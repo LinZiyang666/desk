@@ -194,7 +194,9 @@ class _Action():
         if self.multimodality is not None:
             assert all(m in ["text","vision","audio","packing"] for m in self.multimodality), "multimodality only allow text, vision, audio, packing"
         
-
+    def set_dependency(self, dependency: Dict[int, tuple[int, ...]]):
+        self.dependency = dependency
+    
     # -----------------------------------------------------------------------
     # NOTE: The order here matches the from_str method parameter order:
     # stage_index, rank, computation_type, microbatch_index, dest_rank, upstream

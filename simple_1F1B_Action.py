@@ -1,5 +1,5 @@
 from pipelining_source_code.schedules import _Action, _ComputationType
-
+from typing import Dict, List, Tuple, Optional
 
 def generate_1f1b_pipeline_actions(num_stages: int, num_microbatches: int, upstream = None):
     actions_per_rank = {}
@@ -211,3 +211,77 @@ def print_pipeline_actions(num_stages, num_microbatches):
 
 if __name__ == "__main__":
     print_pipeline_actions(3, 8)
+    
+    
+    
+    
+def add_comm_dependencies(communication_order, actions_per_rank):
+    """
+    communication_order: List[Tuple[int, int, int]]
+        Each tuple is (rank, microbatch_index, send_flag) where send_flag: 1->F, 0->B.
+        We interpret every tuple as a SEND. For each tuple after the first, its SEND will
+        depend on the RECV corresponding to the previous tuple.
+
+    actions_per_rank: Dict[int, List[_Action]]
+        Mutated in-place. For each current SEND, we add a dependency on the RECV that
+        matches the previous tuple's (rank, microbatch, F/B).
+    """
+    # Local helpers (kept inside so the top-level API is a single function)
+    def mb_matches(action_mb, mb_val: int) -> bool:
+        # action_mb could be int or tuple[int, ...]
+        return (mb_val in action_mb) if isinstance(action_mb, tuple) else (action_mb == mb_val)
+
+    # Resolve enum values without importing here
+    # Expecting names on your side: SEND_F, SEND_B, RECV_F, RECV_B
+    def send_flag_to_ct(flag):
+        return getattr(_ComputationType, "SEND_F" if flag == 1 else "SEND_B")
+
+    def recv_flag_to_ct(flag):
+        return getattr(_ComputationType, "RECV_F" if flag == 1 else "RECV_B")
+
+    prev = None
+    for cur in communication_order:
+        if prev is None:
+            prev = cur
+            continue
+
+        send_rank, send_mb, send_flag = cur
+        prev_rank, prev_mb, prev_flag = prev
+
+        # 1) Find the current SEND action on send_rank that matches (send_mb, send_flag)
+        send_ct = send_flag_to_ct(send_flag)
+        send_action = None
+        for a in actions_per_rank.get(send_rank, ()):
+            if a.computation_type == send_ct and mb_matches(a.microbatch_index, send_mb):
+                send_action = a
+                break
+        if send_action is None:
+            raise RuntimeError(f"SEND not found for {cur}")
+
+        # 2) Find the RECV action that pairs with the *previous* SEND tuple
+        #    We look for RECV_* whose dest_rank == prev_rank and mb matches prev_mb.
+        recv_ct = recv_flag_to_ct(prev_flag)
+        recv_action = None
+        for r, acts in actions_per_rank.items():
+            for a in acts:
+                if (a.computation_type == recv_ct
+                    and a.dest_rank == prev_rank
+                    and mb_matches(a.microbatch_index, prev_mb)):
+                    recv_action = a
+                    break
+            if recv_action is not None:
+                break
+        if recv_action is None:
+            raise RuntimeError(f"RECV not found for previous {prev}")
+
+        # 3) Wire dependency: current SEND depends on that RECV
+        #    dependency: Dict[int, Tuple[int, ...]] where key = rank of depended action
+        dep: Dict[int, Tuple[int, ...]] = send_action.dependency or {}
+        existed = list(dep.get(recv_action.rank, ()))
+        if recv_action.id not in existed:
+            existed.append(recv_action.id)
+        dep[recv_action.rank] = tuple(existed)
+        send_action.set_dependency(dep)
+
+        prev = cur
+
