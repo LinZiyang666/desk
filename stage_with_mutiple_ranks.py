@@ -539,7 +539,7 @@ class PipelineStage_with_mutiple_ranks(PipelineStage):
 
         composite_args = None
 
-        use_scheduler_inputs = bool(args) and pack_size > 1
+        use_scheduler_inputs = bool(args) and pack_size >= 1
 
         if need_rt_bcast and not use_scheduler_inputs:
             if self.is_leader:
