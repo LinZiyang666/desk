@@ -37,8 +37,8 @@ sudo iptables -t mangle -C OUTPUT -m set --match-set "${SET}" dst -j MARK --set-
 # 可选：把连接标记保存/恢复（长连接/多包一致性更好）
 sudo iptables -t mangle -C OUTPUT -m set --match-set "${SET}" dst -j CONNMARK --save-mark 2>/dev/null \
   || sudo iptables -t mangle -A OUTPUT -m set --match-set "${SET}" dst -j CONNMARK --save-mark
-sudo iptables -t mangle -C OUTPUT -m connmark --restore-mark 2>/dev/null \
-  || sudo iptables -t mangle -A OUTPUT -m connmark --restore-mark
+sudo iptables -t mangle -C OUTPUT -j CONNMARK --restore-mark 2>/dev/null \
+  || sudo iptables -t mangle -A OUTPUT -j CONNMARK --restore-mark
 
 # 6) 验证（可选）
 echo "==== ipset ====" && sudo ipset list "${SET}" | head -n 20
