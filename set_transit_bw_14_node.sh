@@ -79,7 +79,7 @@ tc filter add dev "${WAN_IF}" parent ${ROOT_INGRESS_ID} protocol all u32 match u
   action mirred egress redirect dev "${IFB_DEV}"
 
 # 在 IFB 上做和 egress 同样的 HTB 限速
-tc qdisc add dev "${IFB_DEV}" root handle 2: htb default 2:10
+tc qdisc add dev "${IFB_DEV}" root handle 2: htb default 10
 tc class add dev "${IFB_DEV}" parent 2: classid 2:10 htb rate 10000mbit ceil 10000mbit
 tc class add dev "${IFB_DEV}" parent 2: classid 2:66 htb rate ${MAX_Mbps}mbit ceil ${MAX_Mbps}mbit
 tc qdisc add dev "${IFB_DEV}" parent 2:10 fq_codel
