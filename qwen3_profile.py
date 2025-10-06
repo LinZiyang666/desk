@@ -129,13 +129,11 @@ def main():
     stage_mod = PartMiddle(full, 0, layers)
     stage_mod.to(device)
     
-    del full                        
-    import gc; gc.collect()
-    
-    # 假设 stage_mod 是 PartMiddle(...)，且 model = 你切分前的 full 或同配置对象
-    
     hidden = synth_hidden(full, B, L, seed=42, device="cpu")   # H 自动从 config 取
     attn_mask = synth_attn_mask(B, L, mode="causal", device="cpu")
+
+    del full                        
+    import gc; gc.collect()
 
     stage_mod.train(False)   # 关闭 dropout 等随机性（Qwen3 通常无 dropout，但稳妥）
     out, attn_mask_used = stage_mod(hidden.requires_grad_(True), attn_mask)
