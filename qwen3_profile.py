@@ -137,14 +137,21 @@ def main():
 
     del full                        
     import gc; gc.collect()
+    
+    from recorder import Recorder
+    rec =  Recorder(0)
 
     stage_mod.train(False)   # 关闭 dropout 等随机性（Qwen3 通常无 dropout，但稳妥）
-    out, attn_mask_used = stage_mod(hidden.requires_grad_(True), attn_mask)
+    with rec.record(batch_id=0,action_id=0,action="FORWARD",stage_idx=0,mb_idx=0):
+        out, attn_mask_used = stage_mod(hidden.requires_grad_(True), attn_mask)
     print("forward算完了")
     
     # 反传（若你需要计入 backward 的算力）
     grad_out = synth_grad_like(out, seed=43)
-    out.backward(grad_out)
+    with rec.record(batch_id=0,action_id=1,action="FULL_BACKWARD",stage_idx=0,mb_idx=0):
+        out.backward(grad_out)
+        
+    rec.dump()
     print("backward算完了")
     
     
