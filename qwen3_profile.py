@@ -16,6 +16,8 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.distributed.algorithms.ddp_comm_hooks import default_hooks
 from simple_1F1B_Action import generate_1f1b_pipeline_actions, generate_1f1b_pipeline_actions_pro
 
+torch.set_num_threads(16)
+
 class PartMiddle(nn.Module):
     """公共基类：仅负责若干 transformer layer。"""
     def __init__(self, model, start, end):
