@@ -618,7 +618,7 @@ class PipelineStage_with_mutiple_ranks(PipelineStage):
             #     import os
             #     try:
             #         save_dir = dump_forward_debug(
-            #             save_root=os.path.abspath("./framework_forward"),
+            #             save_root=os.path.abspath("./middle_tensors/qwen3_0.6b"),
             #             composite_args=composite_args,
             #             composite_kwargs=composite_kwargs,
             #             outputs=None,
