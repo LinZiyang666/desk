@@ -42,6 +42,7 @@ class Recorder:
         net_sample_interval_ms: int = 10,
         net_actions: Optional[Iterable[str]] = None,
         measure_net: bool = True,
+        mark_actions: bool = True
     ):
         self.rank = rank
         self.events: List[TraceEvent] = []
@@ -55,6 +56,7 @@ class Recorder:
         self._sysmon_active = {}       # batch_id -> threading.Event (Stop sign)
         self._sysmon_threads = {}      # batch_id -> Thread
         self._sysmon_buffer = []       # List[SysSample]
+        self.mark_actions = mark_actions
 
 
     def set_enabled(self, flag: bool):
@@ -103,7 +105,8 @@ class Recorder:
                 thr.join()
 
             # print(f"{action} {mb_idx}计时结束，{action_id}添加表")
-            _mark_done(batch_id=batch_id,action_id=action_id)
+            if self.mark_actions:
+                _mark_done(batch_id=batch_id,action_id=action_id)
             
             self.events.append(
                 TraceEvent(
@@ -177,15 +180,15 @@ class Recorder:
                 
                 if need_net:
                     stop_evt.set()
-                
-                # Mark done after waiting completes
-                if chunk_idx is None:
-                    _mark_done(batch_id=batch_id, action_id=action_id)
-                else:
-                    # print(f"[{dist.get_rank()}] Marking done chunk for batch={batch_id}, action={action_id}, chunk={chunk_idx}")
-                    _mark_done_chunk(batch_id=batch_id, action_id=action_id, chunk_idx=chunk_idx)
-                    # print(f"[{self.rank}] DONE {action} st={stage_idx} mb={mb_idx} chunk={chunk_idx} "
-                    #     f"works={len(works)}")
+                if self.mark_actions:
+                    # Mark done after waiting completes
+                    if chunk_idx is None:
+                        _mark_done(batch_id=batch_id, action_id=action_id)
+                    else:
+                        # print(f"[{dist.get_rank()}] Marking done chunk for batch={batch_id}, action={action_id}, chunk={chunk_idx}")
+                        _mark_done_chunk(batch_id=batch_id, action_id=action_id, chunk_idx=chunk_idx)
+                        # print(f"[{self.rank}] DONE {action} st={stage_idx} mb={mb_idx} chunk={chunk_idx} "
+                        #     f"works={len(works)}")
             except Exception as e:
                 status = f"error:{type(e).__name__}"
                 end_ns = time.time_ns()

@@ -139,7 +139,7 @@ def main():
     import gc; gc.collect()
     
     from recorder import Recorder
-    rec =  Recorder(0)
+    rec =  Recorder(0,mark_actions=False)
 
     stage_mod.train(False)   # 关闭 dropout 等随机性（Qwen3 通常无 dropout，但稳妥）
     with rec.record(batch_id=0,action_id=0,action="FORWARD",stage_idx=0,mb_idx=0):
