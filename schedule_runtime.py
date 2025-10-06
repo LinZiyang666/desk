@@ -1712,7 +1712,22 @@ class PipelineScheduleRuntimeWithDirection(schedule.PipelineScheduleMulti):
             with open(local_cpu_mem_path, "r") as f:
                 local_cpu_mem_lines = f.read().splitlines()
         except FileNotFoundError:
-            local_cpu_mem_lines = []
+            try:
+                pending_buf = getattr(self._rec, "_sysmon_buffer", [])
+                if pending_buf:
+                    local_cpu_mem_lines = [
+                        json.dumps({
+                            "rank": s.rank,
+                            "batch_id": s.batch_id,
+                            "time_ns": s.time_ns,
+                            "cpu_utilization": s.cpu_utilization,
+                            "memory_utilization": s.memory_utilization,
+                        })
+                        for s in pending_buf
+                    ]
+                    pending_buf.clear()
+            except Exception:
+                pass
 
         if dist.is_initialized():
             if dist.get_world_size() == 1:
