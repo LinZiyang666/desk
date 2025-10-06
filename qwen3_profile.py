@@ -125,7 +125,7 @@ def main():
     tok.pad_token = tok.eos_token
     full = AutoModelForCausalLM.from_pretrained(name, trust_remote_code=True)
 
-    layers, B, L =8, 8, 256
+    layers, B, L =8, 8, 2048
     
     stage_mod = PartMiddle(full, 0, layers)
     stage_mod.to(device)
