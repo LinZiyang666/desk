@@ -117,9 +117,6 @@ def synth_grad_like(output, seed=4321, std=0.01):
 
 
 def main():
-    rank = int(os.environ["RANK"])
-    world = int(os.environ["WORLD_SIZE"])
-
     device = torch.device("cpu")     
 
     name = "Qwen/Qwen3-0.6B"
@@ -130,6 +127,7 @@ def main():
     layers, B, L =8, 8, 2048
     
     stage_mod = PartMiddle(full, 0, layers)
+    stage_mod.to(device)
     
     del full                        
     import gc; gc.collect()
