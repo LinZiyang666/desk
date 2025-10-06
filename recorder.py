@@ -7,7 +7,6 @@ import torch.distributed as dist
 from schedule_runtime import _mark_done, _mark_done_chunk
 
 @dataclass
-@dataclass
 class TraceEvent:
     batch_id:  int
     rank:       int
@@ -23,6 +22,16 @@ class TraceEvent:
     # 新增：执行状态（completed / error:...）
     status:     str = "completed"
     # (ts_ns, up_mbps, down_mbps)
+    
+
+@dataclass
+class SysSample:
+    rank: int
+    batch_id: int
+    time_ns: int
+    cpu_utilization: float       # 单位：%
+    memory_utilization: float    # 单位：%
+
 
 class Recorder:
     _NET_ACTIONS = {"SEND_F", "RECV_F", "SEND_B", "RECV_B", "ALL_REDUCE"}
@@ -40,6 +49,13 @@ class Recorder:
         self.measure_net = measure_net
         self.sample_interval = max(net_sample_interval_ms, 1) / 1000.0   # 秒
         self.net_actions = set(net_actions) if net_actions else self._NET_ACTIONS
+        
+        self._sysmon_interval_s = 0.1
+        self._sysmon_lock = threading.Lock() # 轮询间隔100ms, 防止出现占用过高的情况
+        self._sysmon_active = {}       # batch_id -> threading.Event (Stop sign)
+        self._sysmon_threads = {}      # batch_id -> Thread
+        self._sysmon_buffer = []       # List[SysSample]
+
 
     def set_enabled(self, flag: bool):
         self.enabled = flag
@@ -49,6 +65,8 @@ class Recorder:
         if not self.enabled:
             yield
             return
+        
+        self._sysmon_start_if_new(batch_id)
 
         need_net = self.measure_net and action in self.net_actions
         samples: List[Tuple[int, float, float]] = []
@@ -112,6 +130,8 @@ class Recorder:
     ):
         if not self.enabled:
             return
+        
+        self._sysmon_start_if_new(batch_id)
         
         need_net = self.measure_net and action in self.net_actions
         need_net = False
@@ -181,10 +201,85 @@ class Recorder:
                 )
         
         threading.Thread(target=waiter, daemon=True).start()
+        
+    
+        # === 新增：系统资源监控辅助函数 ===
+    def _sysmon_start_if_new(self, batch_id: int):
+        """若首次见到该 batch_id，则启动一个采样线程；仅追加，不影响旧逻辑。"""
+        if not self.enabled:
+            return
+        with self._sysmon_lock:
+            if batch_id in self._sysmon_active:
+                return
+            stop_evt = threading.Event()
+            self._sysmon_active[batch_id] = stop_evt
 
+            def _sampler():
+                # 首次调用做一次“预热”，避免第一次 cpu_percent 异常值
+                try:
+                    psutil.cpu_percent(interval=None)
+                except Exception:
+                    pass
+                while not stop_evt.is_set():
+                    t_ns = time.time_ns()
+                    try:
+                        cpu = float(psutil.cpu_percent(interval=None))  # %
+                        mem = float(psutil.virtual_memory().percent)    # %
+                    except Exception:
+                        cpu, mem = -1.0, -1.0
+                    with self._sysmon_lock:
+                        self._sysmon_buffer.append(
+                            SysSample(self.rank, batch_id, t_ns, cpu, mem)
+                        )
+                    time.sleep(self._sysmon_interval_s)
 
+            thr = threading.Thread(target=_sampler, daemon=True)
+            self._sysmon_threads[batch_id] = thr
+            thr.start()
+
+    def _sysmon_stop_all(self):
+        """停止所有 batch 的采样线程（用于 dump 切片边界），仅新增不影响旧逻辑。"""
+        with self._sysmon_lock:
+            for bid, evt in list(self._sysmon_active.items()):
+                evt.set()
+            for bid, thr in list(self._sysmon_threads.items()):
+                try:
+                    thr.join(timeout=1.0)
+                except Exception:
+                    pass
+            self._sysmon_active.clear()
+            self._sysmon_threads.clear()
+
+    def _sysmon_flush_to_file(self, fname: Optional[str] = None):
+        """将缓冲写入独立 JSONL 文件，每行一条 SysSample。"""
+        with self._sysmon_lock:
+            buf = self._sysmon_buffer
+            self._sysmon_buffer = []
+
+        if not buf:
+            return
+
+        path = fname or f"cpu_mem_rank{self.rank}.jsonl"
+        try:
+            with open(path, "a") as f:
+                for s in buf:
+                    # 序列化为 5 字段的扁平对象
+                    rec = {
+                        "rank": s.rank,
+                        "batch_id": s.batch_id,
+                        "time_ns": s.time_ns,
+                        "cpu_utilization": s.cpu_utilization,
+                        "memory_utilization": s.memory_utilization,
+                    }
+                    f.write(json.dumps(rec) + "\n")
+        except Exception:
+            # 静默失败，不影响旧逻辑
+            pass
     
     def dump(self, fname: str = None):
         fname = fname or f"timeline_rank{self.rank}.json"
         with open(fname, "w") as f:
             json.dump([asdict(e) for e in self.events], f, indent=2)
+        
+        self._sysmon_flush_to_file()
+        self._sysmon_stop_all()

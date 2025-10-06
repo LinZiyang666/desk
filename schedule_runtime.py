@@ -1692,6 +1692,7 @@ class PipelineScheduleRuntimeWithDirection(schedule.PipelineScheduleMulti):
 
 
     def save_timeline(self, fname_prefix="timeline"):
+        
         if dist.is_initialized():
             if dist.get_world_size() == 1:
                 self._rec.dump(f"{fname_prefix}_rank0.json")
@@ -1705,3 +1706,40 @@ class PipelineScheduleRuntimeWithDirection(schedule.PipelineScheduleMulti):
         else:
             self._rec.dump(f"{fname_prefix}_solo.json")
         self._rec.events.clear()
+        
+        local_cpu_mem_path = f"cpu_mem_rank{self.rank}.jsonl"
+        try:
+            with open(local_cpu_mem_path, "r") as f:
+                local_cpu_mem_lines = f.read().splitlines()
+        except FileNotFoundError:
+            local_cpu_mem_lines = []
+
+        if dist.is_initialized():
+            if dist.get_world_size() == 1:
+                # 单进程已初始化分布式：输出 rank0 的汇总文件
+                out_cpu_mem = f"{fname_prefix}_cpu_mem_rank0.jsonl"
+                if local_cpu_mem_lines:
+                    with open(out_cpu_mem, "w") as g:
+                        for line in local_cpu_mem_lines:
+                            g.write(line + "\n")
+            else:
+                # 多进程：收集所有 rank 的 JSONL 行并在 rank0 写成一个文件
+                gathered_cpu_mem = [None] * dist.get_world_size()
+                dist.gather_object(local_cpu_mem_lines,
+                                   gathered_cpu_mem if self.rank == 0 else None, dst=0)
+                if self.rank == 0:
+                    out_cpu_mem = f"{fname_prefix}_cpu_mem_all.jsonl"
+                    with open(out_cpu_mem, "w") as g:
+                        for lines in gathered_cpu_mem:
+                            if not lines:
+                                continue
+                            for line in lines:
+                                g.write(line + "\n")
+        else:
+            # 未初始化分布式：输出 solo 汇总文件
+            out_cpu_mem = f"{fname_prefix}_cpu_mem_solo.jsonl"
+            if local_cpu_mem_lines:
+                with open(out_cpu_mem, "w") as g:
+                    for line in local_cpu_mem_lines:
+                        g.write(line + "\n")
+
