@@ -93,8 +93,9 @@ def synth_attn_mask(B, L, mode="causal", window=None, device="cpu"):
 
 def synth_grad_like(output, seed=4321, std=0.01):
     """给 backward 用的外部梯度，确定性随机，避免全 1 带来的模式化分支。"""
-    g = torch.Generator(device=output.device).manual_seed(seed)
-    grad = torch.randn_like(output, generator=g) * std
+    dev = output.device
+    g = torch.Generator(device="cpu" if dev.type == "cpu" else dev).manual_seed(seed)
+    grad = torch.randn(output.shape, generator=g, device=dev, dtype=output.dtype) * std
     return grad.contiguous()
 
 
