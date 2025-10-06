@@ -237,7 +237,7 @@ def main():
 
     device = torch.device("cpu")     
 
-    name = "Qwen/Qwen3-0.6B"
+    name = "Qwen/Qwen3-1.7B"
     tok = AutoTokenizer.from_pretrained(name, trust_remote_code=True)
     tok.pad_token = tok.eos_token
     full = AutoModelForCausalLM.from_pretrained(name, trust_remote_code=True)
