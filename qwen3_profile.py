@@ -127,12 +127,12 @@ def main():
     tok.pad_token = tok.eos_token
     full = AutoModelForCausalLM.from_pretrained(name, trust_remote_code=True)
 
-    layers, B, L =8, 8, 2048
+    layers, B, L =8, 8, 256
     
     stage_mod = PartMiddle(full, 0, layers)
     stage_mod.to(device)
     
-    hidden = synth_hidden(full, B, L, seed=42, device="cpu")   # H 自动从 config 取
+    hidden = synth_hidden(full, B, L, seed=42, device="cpu")
     attn_mask = synth_attn_mask(B, L, mode="causal", device="cpu")
 
     del full                        
@@ -141,18 +141,45 @@ def main():
     from recorder import Recorder
     rec =  Recorder(0,mark_actions=False)
 
-    stage_mod.train(False)   # 关闭 dropout 等随机性（Qwen3 通常无 dropout，但稳妥）
-    with rec.record(batch_id=0,action_id=0,action="FORWARD",stage_idx=0,mb_idx=0):
-        out, attn_mask_used = stage_mod(hidden.requires_grad_(True), attn_mask)
+    stage_mod.train(False) 
+
+    outs = {}
+    aid = 0 
+
+    # ---- Warmup: 5 个仅 Forward（mb 0..4）----
+    for mb in range(5):
+        with rec.record(batch_id=0, action_id=aid, action="FORWARD", stage_idx=0, mb_idx=mb):
+            out, attn_mask_used = stage_mod(hidden.clone().requires_grad_(True), attn_mask)
+        outs[mb] = out
+        aid += 1
+
+    # ---- Ordinary: 6 轮（每轮先 F 新 mb，再对最老未回传的做 B）----
+    for k in range(6):
+        f_mb = 5 + k           
+        b_mb = k               
+        with rec.record(batch_id=0, action_id=aid, action="FORWARD", stage_idx=0, mb_idx=f_mb):
+            out, attn_mask_used = stage_mod(hidden.clone().requires_grad_(True), attn_mask)
+        outs[f_mb] = out
+        aid += 1
+
+        grad_out = synth_grad_like(outs[b_mb], seed=43 + b_mb)
+        with rec.record(batch_id=0, action_id=aid, action="FULL_BACKWARD", stage_idx=0, mb_idx=b_mb):
+            outs[b_mb].backward(grad_out)
+        del outs[b_mb]
+        aid += 1
+
     print("forward算完了")
-    
-    # 反传（若你需要计入 backward 的算力）
-    grad_out = synth_grad_like(out, seed=43)
-    with rec.record(batch_id=0,action_id=1,action="FULL_BACKWARD",stage_idx=0,mb_idx=0):
-        out.backward(grad_out)
-        
+
+    for b_mb in range(6, 11):
+        grad_out = synth_grad_like(outs[b_mb], seed=43 + b_mb)
+        with rec.record(batch_id=0, action_id=aid, action="FULL_BACKWARD", stage_idx=0, mb_idx=b_mb):
+            outs[b_mb].backward(grad_out)
+        del outs[b_mb]
+        aid += 1
+
     rec.dump()
     print("backward算完了")
+
     
     
 
