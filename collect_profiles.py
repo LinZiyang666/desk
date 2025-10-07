@@ -38,49 +38,73 @@ def compute_avg_cpu_ratio_from_jsonl(cpu_jsonl_path: Path) -> float | None:
     avg = sum(vals) / len(vals)
     return avg / 50.0
 
+def infer_keys(root: Path, leaf: Path) -> dict | None:
+    """Infer (model_name, frequency, layers, mb_size) from the directory layout.
+       Works whether root is the global root or already a model_name dir.
+    """
+    try:
+        rel_parts = leaf.relative_to(root).parts
+    except ValueError:
+        # leaf is not under root (shouldn't happen)
+        return None
+
+    # We expect rel_parts to end with [frequency, layers, mb_size]
+    # If rel_parts has 4+ parts, assume last 4 are [model_name, frequency, layers, mb_size]
+    # If rel_parts has exactly 3, assume root.name is model_name
+    if len(rel_parts) >= 4:
+        model_name, frequency, layers, mb_size = rel_parts[-4:]
+    elif len(rel_parts) == 3:
+        model_name = root.name
+        frequency, layers, mb_size = rel_parts[-3:]
+    else:
+        return None
+
+    return {
+        "model_name": model_name,
+        "frequency": frequency,
+        "layers": layers,
+        "mb_size": mb_size
+    }
+
 def main():
     ap = argparse.ArgumentParser(description="Traverse profiles and extract metrics into JSON.")
-    ap.add_argument("--root", type=str, required=True, help="Root directory containing model_name/{frequency}/{layers}/{mb_size} structure.")
+    ap.add_argument("--root", type=str, required=True, help="Root directory containing model_name/{frequency}/{layers}/{mb_size} structure, or a single model_name directory.")
     ap.add_argument("--output", type=str, default="profiles_summary.json", help="Where to write the combined JSON output.")
     ap.add_argument("--timeline-name", type=str, default="timeline_rank0.json", help="Timeline filename to parse in each leaf dir.")
     ap.add_argument("--cpu-name", type=str, default="cpu_mem_rank0.jsonl", help="CPU jsonl filename to parse in each leaf dir.")
     args = ap.parse_args()
 
-    root = Path(args.root)
+    root = Path(args.root).resolve()
     if not root.exists():
         print(f"Root path not found: {root}", file=sys.stderr)
         sys.exit(1)
 
     results = []
-    # Expected: model_name/{frequency}/{layers}/{mb_size}
-    for model_dir in [p for p in root.iterdir() if p.is_dir()]:
-        model_name = model_dir.name
-        for freq_dir in [p for p in model_dir.iterdir() if p.is_dir()]:
-            frequency = freq_dir.name
-            for layer_dir in [p for p in freq_dir.iterdir() if p.is_dir()]:
-                layers = layer_dir.name
-                for mb_dir in [p for p in layer_dir.iterdir() if p.is_dir()]:
-                    mb_size = mb_dir.name
-                    timeline_path = mb_dir / args.timeline_name
-                    cpu_path = mb_dir / args.cpu_name
+    for dirpath, dirnames, filenames in os.walk(root):
+        dp = Path(dirpath)
+        # Only consider directories that contain both files
+        if args.timeline_name in filenames and args.cpu_name in filenames:
+            keys = infer_keys(root, dp)
+            if not keys:
+                continue
+            timeline_path = dp / args.timeline_name
+            cpu_path = dp / args.cpu_name
 
-                    total_ms = compute_total_time_ms_from_timeline(timeline_path) if timeline_path.exists() else None
-                    cpu_ratio = compute_avg_cpu_ratio_from_jsonl(cpu_path) if cpu_path.exists() else None
+            total_ms = compute_total_time_ms_from_timeline(timeline_path)
+            cpu_ratio = compute_avg_cpu_ratio_from_jsonl(cpu_path)
 
-                    results.add if False else None  # keep 'results' referenced for readability
-                    results.append({
-                        "model_name": model_name,
-                        "frequency": frequency,
-                        "layers": layers,
-                        "mb_size": mb_size,
-                        "path": str(mb_dir),
-                        "total_time_ms": total_ms,
-                        "avg_cpu_ratio": cpu_ratio
-                    })
+            results.append({
+                **keys,
+                "path": str(dp),
+                "total_time_ms": total_ms,
+                "avg_cpu_ratio": cpu_ratio
+            })
 
     with open(args.output, "w") as f:
         json.dump(results, f, indent=2)
     print(f"Wrote {len(results)} records to {args.output}")
+    if len(results) == 0:
+        print("Hint: Ensure your tree looks like model_name/{frequency}/{layers}/{mb_size}/ and files are named exactly as arguments.", file=sys.stderr)
 
 if __name__ == "__main__":
     main()
