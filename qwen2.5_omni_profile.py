@@ -186,6 +186,19 @@ def _move_outputs_to_dir(target_dir: str, verbose: bool = False):
     if not moved_any and verbose:
         print(f"[WARN] 未找到需要移动的输出文件（可能本轮未产生或命名不同）。")
 
+
+
+parser = argparse.ArgumentParser()
+parser.add_argument(
+    "--freq-range", type=float, nargs=2, metavar=("START", "END"),
+    default=[1.2, 3.2],
+    help="CPU frequency sweep range in GHz, e.g. --freq-range 1.2 3.2"
+)
+parser.add_argument(
+    "--freq-step", type=float, default=0.2,
+    help="CPU frequency sweep step in GHz, e.g. --freq-step 0.2"
+)
+args = parser.parse_args()
 def main():
     device = torch.device("cpu")
 
@@ -193,9 +206,36 @@ def main():
     full_base = Qwen2_5OmniThinkerForConditionalGeneration.from_pretrained(name, trust_remote_code=True)
     full_base = full_base.model
     L = 256  # 序列长度保持与你原脚本一致
-    # 三重循环参数
-    freqs = [round(1.2 + 0.2*i, 1) for i in range(int((3.2 - 1.2) / 0.2) + 1)] + [3.2]
-    freqs = sorted(set(freqs))  # 防止浮点累加误差
+    from decimal import Decimal, getcontext
+    getcontext().prec = 6   # 足够处理一位小数
+
+    def build_freqs(start: float, end: float, step: float):
+        if step <= 0:
+            raise ValueError("freq-step must be > 0")
+        if end < start:
+            # 允许用户反写，自动交换
+            start, end = end, start
+
+        s = Decimal(str(start))
+        e = Decimal(str(end))
+        st = Decimal(str(step))
+
+        # floor((end-start)/step) + 1 个点
+        n = int(((e - s) / st).to_integral_value(rounding="ROUND_FLOOR")) + 1
+        vals = [float(s + st * i) for i in range(n)]
+
+        # 若因舍入遗漏端点，补上 end
+        if vals[-1] < float(e) - 1e-12:
+            vals.append(float(e))
+
+        # 统一到一位小数，去重并排序（防浮点毛刺）
+        vals = sorted({round(v, 1) for v in vals})
+        return vals
+
+    # 在 main() 或你需要的地方使用：
+    start, end = args.freq_range
+    step = args.freq_step
+    freqs = build_freqs(start, end, step)
     layers_list = list(range(1, 11))
     B_list = list(range(1, 11))
 
@@ -279,7 +319,7 @@ def main():
                     rec.dump()
 
                     # 移动到 ./qwen3_0.6/{cpu_frequence}/{layers}/{mb_size}/
-                    target_dir = os.path.join("qwen3_1.7B", f"{f_ghz:.1f}", str(layers), str(B))
+                    target_dir = os.path.join("qwen2.5_omni", f"{f_ghz:.1f}", str(layers), str(B))
                     _move_outputs_to_dir(target_dir, verbose=False)
 
                     # 明确显示当前完成项
