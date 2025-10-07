@@ -21,6 +21,7 @@ def generate_1f1b_pipeline_actions(num_stages: int, num_microbatches: int, upstr
             return a
 
         # Warmup
+        print(f"warmup_chunks {warmup_chunks}")
         for _ in range(warmup_chunks):
             if stage_idx > 0:
                 actions.append(make_action(stage_idx, rank, _ComputationType.RECV_F, fwd_mb, rank - 1))
@@ -30,7 +31,9 @@ def generate_1f1b_pipeline_actions(num_stages: int, num_microbatches: int, upstr
             fwd_mb += 1
 
         # 1B1F
+        ordinary = 0
         while fwd_mb < num_microbatches:
+            ordinary += 1
             if stage_idx < num_stages - 1:
                 actions.append(make_action(stage_idx, rank, _ComputationType.RECV_B, bwd_mb, rank + 1))
             actions.append(make_action(stage_idx, rank, _ComputationType.FULL_BACKWARD, bwd_mb, None))
@@ -44,6 +47,8 @@ def generate_1f1b_pipeline_actions(num_stages: int, num_microbatches: int, upstr
             if stage_idx < num_stages - 1:
                 actions.append(make_action(stage_idx, rank, _ComputationType.SEND_F, fwd_mb, rank + 1))
             fwd_mb += 1
+        
+        print(f"ordinary {ordinary}")
 
         # Cooldown
         while bwd_mb < num_microbatches:
@@ -77,4 +82,4 @@ def print_pipeline_actions(num_stages, num_microbatches):
 
 
 if __name__ == "__main__":
-    print_pipeline_actions(3, 8)
+    print_pipeline_actions(3, 11)
