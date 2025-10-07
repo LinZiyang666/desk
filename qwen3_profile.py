@@ -228,7 +228,7 @@ def _move_outputs_to_dir(target_dir: str, verbose: bool = False):
 def main():
     device = torch.device("cpu")
 
-    name = "Qwen/Qwen3-0.6B"
+    name = "Qwen/Qwen3-1.7B"
     tok = AutoTokenizer.from_pretrained(name, trust_remote_code=True)
     tok.pad_token = tok.eos_token
     full_base = AutoModelForCausalLM.from_pretrained(name, trust_remote_code=True)
@@ -312,7 +312,7 @@ def main():
                     rec.dump()
 
                     # 移动到 ./qwen3_0.6/{cpu_frequence}/{layers}/{mb_size}/
-                    target_dir = os.path.join("qwen3_0.6", f"{f_ghz:.1f}", str(layers), str(B))
+                    target_dir = os.path.join("qwen3_1.7B", f"{f_ghz:.1f}", str(layers), str(B))
                     _move_outputs_to_dir(target_dir, verbose=False)
 
                     # 明确显示当前完成项
