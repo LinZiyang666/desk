@@ -12,6 +12,7 @@ from stage_with_mutiple_ranks import PipelineStage_with_mutiple_ranks
 from schedule_runtime import PipelineScheduleRuntimeWithDirection
 from pipelining_source_code.schedules import _Action, _ComputationType
 
+from transformers.models.qwen2_5_omni import Qwen2_5OmniThinkerForConditionalGeneration
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.distributed.algorithms.ddp_comm_hooks import default_hooks
 from simple_1F1B_Action import generate_1f1b_pipeline_actions, generate_1f1b_pipeline_actions_pro
@@ -19,86 +20,126 @@ from simple_1F1B_Action import generate_1f1b_pipeline_actions, generate_1f1b_pip
 torch.set_num_threads(16)
 
 class PartMiddle(nn.Module):
-    """公共基类：仅负责若干 transformer layer。"""
-    def __init__(self, model, start, end):
+    def __init__(self, text_model, L1, L2):
         super().__init__()
-        self.layers = nn.ModuleList(model.model.layers[start:end])
-        self.rotary_emb = model.model.rotary_emb
-
-    def forward(self, hidden, attn_mask):
-        bsz, seqlen = hidden.shape[:2]
-        device = hidden.device
-        position_ids = torch.arange(seqlen, device=device).unsqueeze(0).expand(bsz, -1)
+        self.layers = nn.ModuleList(text_model.layers[L1:L2])
+        self.rotary_emb = text_model.rotary_emb
+        
+    def forward(self, *args, **kwargs):
+        # Handle flexible arguments
+        if len(args) >= 3:
+            hidden, attn_mask, position_ids = args[:3]
+        else:
+            hidden = args[0] if len(args) > 0 else kwargs['hidden']
+            attn_mask = args[1] if len(args) > 1 else kwargs['attn_mask']
+            position_ids = args[2] if len(args) > 2 else kwargs['position_ids']
+        
+        if position_ids.dim() == 2:
+            position_ids = position_ids.unsqueeze(0).repeat(3, 1, 1)
+        
         pos_emb = self.rotary_emb(hidden, position_ids)
+        for blk in self.layers:
+            hidden = blk(
+                hidden_states=hidden,
+                attention_mask=attn_mask,
+                position_ids=position_ids,
+                position_embeddings=pos_emb,
+                output_attentions=False,
+                use_cache=False
+            )[0]
+        return hidden.contiguous(), attn_mask.contiguous(), position_ids.contiguous()  
 
-        if attn_mask.dim() == 2:                       # 兼容单矩阵传递
-            attn_mask = torch.triu(
-                torch.full((seqlen, seqlen), float('-inf'), device=device), 1
-            ).unsqueeze(0).unsqueeze(0).expand(bsz, 1, -1, -1).contiguous()
-        elif not attn_mask.is_contiguous():
-            attn_mask = attn_mask.contiguous()
 
-        for layer in self.layers:
-            hidden = layer(hidden_states=hidden,
-                           attention_mask=attn_mask,
-                           position_ids=position_ids,
-                           position_embeddings=pos_emb,
-                           output_attentions=False,
-                           use_cache=False)[0]
-        return hidden.contiguous(), attn_mask          
-
-def synth_hidden(model, B, L, seed=1234, device="cpu", dtype=None, std=0.02):
-    """造 [B, L, H] 的 hidden，确定性高斯分布。"""
-    H = model.config.hidden_size
+# ---------------------------
+# 1) 造 hidden: [B, L, H]
+# ---------------------------
+def synth_hidden(text_model, B, L, *, seed=1234, std=0.02, device="cpu", dtype=None):
+    """
+    生成确定性高斯 hidden，数值稳定（小方差），形状 [B, L, H]。
+    H 自动从 text_model.config.hidden_size 读取。
+    """
+    H = getattr(getattr(text_model, "config", text_model), "hidden_size")
     if dtype is None:
         try:
-            dtype = next(model.parameters()).dtype
+            dtype = next(text_model.parameters()).dtype
         except StopIteration:
             dtype = torch.float32
 
     g = torch.Generator(device=device).manual_seed(seed)
-    # 正态分布，方差小，数值稳定
-    hidden = torch.randn((B, L, H), generator=g, device=device, dtype=dtype) * std
-    return hidden.contiguous()
+    x = torch.randn((B, L, H), generator=g, device=device, dtype=dtype) * std
+    return x.contiguous()
 
+
+# ---------------------------
+# 2) 造 attention mask: 4D
+#    支持 'causal' / 'sliding' / 'dense'
+# ---------------------------
 _mask_cache = {}
 
-def synth_attn_mask(B, L, mode="causal", window=None, device="cpu"):
+def synth_attn_mask(B, L, *, mode="causal", window=None, device="cpu", dtype=torch.float32):
     """
-    生成 attention_mask：
-    - 'causal': 传 2D (B, L) 的占位，触发你 PartMiddle 里“内部构造因果掩码”的路径（统一且重现）。
-    - 'sliding': 生成 4D (B, 1, L, L) 的带状 -inf 掩码，近似 SWA 的计算图复杂度。
-    - 'dense':   生成 4D 全 0 掩码（无屏蔽，测算子上界）。
+    产出 4D inverted 掩码 (B, 1, L, L)，与 Omni 文本层期望一致：
+      - 允许位置处为 0
+      - 禁止位置处为 极小负值 (≈ -inf)
+    若 mode='sliding'，需提供 window（窗口大小）。
     """
-    key = (B, L, mode, window)
+    key = (B, L, mode, window, device, dtype)
     if key in _mask_cache:
         return _mask_cache[key]
 
-    if mode == "causal":
-        # 传 2D 占位（例如全 1），你的 PartMiddle 会内部构造三角 causal mask
-        attn_mask = torch.ones((B, L), dtype=torch.bool, device=device)
+    min_val = torch.finfo(dtype).min
+    if mode == "dense":
+        # 全允许：全 0
+        mask = torch.zeros((B, 1, L, L), device=device, dtype=dtype)
+
+    elif mode == "causal":
+        # 上三角禁止，含自身以下允许
+        base = torch.full((L, L), fill_value=min_val, device=device, dtype=dtype)
+        base = torch.triu(base, diagonal=1)  # 上三角为 min_val，其他为 0
+        mask = base.unsqueeze(0).unsqueeze(0).expand(B, 1, L, L).contiguous()
+
     elif mode == "sliding":
-        assert window is not None and window > 0, "sliding 模式需要 window"
-        base = torch.full((L, L), float("-inf"), device=device)
-        # 仅允许 [i-window+1, i] 之间注意
+        assert isinstance(window, int) and window > 0, "sliding 模式需要正整数 window"
+        base = torch.full((L, L), fill_value=min_val, device=device, dtype=dtype)
+        # 仅允许 [i-window+1, i] 范围
         for i in range(L):
             s = max(0, i - window + 1)
             base[i, s:i+1] = 0.0
-        attn_mask = base.unsqueeze(0).unsqueeze(0).expand(B, 1, L, L).contiguous()
-    elif mode == "dense":
-        attn_mask = torch.zeros((B, 1, L, L), device=device)
+        mask = base.unsqueeze(0).unsqueeze(0).expand(B, 1, L, L).contiguous()
+
     else:
         raise ValueError(f"Unknown attn mode: {mode}")
 
-    _mask_cache[key] = attn_mask
-    return attn_mask
+    _mask_cache[key] = mask
+    return mask
 
-def synth_grad_like(output, seed=4321, std=0.01):
-    """给 backward 用的外部梯度，确定性随机，避免全 1 带来的模式化分支。"""
-    dev = output.device
-    g = torch.Generator(device="cpu" if dev.type == "cpu" else dev).manual_seed(seed)
-    grad = torch.randn(output.shape, generator=g, device=dev, dtype=output.dtype) * std
+
+# ---------------------------
+# 2.5)（可选）造 position_ids: [3, B, L]
+# Omni 文本使用 3 维 mRoPE；纯文本时三个分量可同一 0..L-1
+# ---------------------------
+def synth_position_ids(B, L, *, device="cpu", base=0):
+    """
+    返回 [3, B, L] 的整型位置索引（纯文本：三路一致）。
+    你可按需求把三路改成 (t, h, w) 的不同步进。
+    """
+    pos = torch.arange(base, base + L, device=device, dtype=torch.long)
+    pos3 = pos.view(1, 1, L).expand(3, B, L).contiguous()
+    return pos3
+
+
+# ---------------------------
+# 3) 造外部梯度：与输出同形
+# ---------------------------
+def synth_grad_like(output, *, seed=4321, std=0.01):
+    """
+    给 backward 用的外部梯度，确定性随机；避免使用 randn_like(generator=...)
+    以兼容较老的 PyTorch。
+    """
+    g = torch.Generator(device=output.device).manual_seed(seed)
+    grad = torch.randn(output.shape, generator=g, device=output.device, dtype=output.dtype) * std
     return grad.contiguous()
+
 
 import shutil, glob
 
@@ -148,11 +189,9 @@ def _move_outputs_to_dir(target_dir: str, verbose: bool = False):
 def main():
     device = torch.device("cpu")
 
-    name = "Qwen/Qwen3-1.7B"
-    tok = AutoTokenizer.from_pretrained(name, trust_remote_code=True)
-    tok.pad_token = tok.eos_token
-    full_base = AutoModelForCausalLM.from_pretrained(name, trust_remote_code=True)
-
+    name = "Qwen/Qwen2.5-Omni-3B"
+    full_base = Qwen2_5OmniThinkerForConditionalGeneration.from_pretrained(name, trust_remote_code=True)
+    full_base = full_base.model
     L = 256  # 序列长度保持与你原脚本一致
     # 三重循环参数
     freqs = [round(1.2 + 0.2*i, 1) for i in range(int((3.2 - 1.2) / 0.2) + 1)] + [3.2]
@@ -174,8 +213,9 @@ def main():
                 # 注意：这里基于 full_base 的结构创建 PartMiddle，不重复下载权重
                 full = full_base  # 仅为可读性，实际仍用同一对象
                 stage_mod = PartMiddle(full, 0, layers).to(device)
-                hidden_cache = {}  # 缓存不同 B 的合成输入，减少重复构造
+                hidden_cache = {}   # 缓存不同 B 的合成输入，减少重复构造
                 attn_cache = {}
+                posid_cache = {}
 
                 for B in B_list:
                     # 更新进度条的任务题头
@@ -185,8 +225,11 @@ def main():
                         hidden_cache[B] = synth_hidden(full, B, L, seed=42, device=str(device))
                     if B not in attn_cache:
                         attn_cache[B] = synth_attn_mask(B, L, mode="causal", device=str(device))
+                    if B not in posid_cache:
+                        posid_cache[B] = synth_position_ids(B, L, device=str(device))
                     hidden = hidden_cache[B]
                     attn_mask = attn_cache[B]
+                    position_ids = posid_cache[B]
 
                     # 回收器
                     from recorder import Recorder
@@ -201,7 +244,9 @@ def main():
                     # Warmup F (5)
                     for mb in range(5):
                         with rec.record(batch_id=0, action_id=aid, action="FORWARD", stage_idx=0, mb_idx=mb):
-                            out, attn_mask_used = stage_mod(hidden.clone().requires_grad_(True), attn_mask)
+                            out, _, _ = stage_mod(hidden.clone().requires_grad_(True),
+                                                  attn_mask,
+                                                  position_ids)
                         outs[mb] = out
                         aid += 1
 
@@ -210,7 +255,9 @@ def main():
                         f_mb = 5 + k
                         b_mb = k
                         with rec.record(batch_id=0, action_id=aid, action="FORWARD", stage_idx=0, mb_idx=f_mb):
-                            out, attn_mask_used = stage_mod(hidden.clone().requires_grad_(True), attn_mask)
+                            out, _, _ = stage_mod(hidden.clone().requires_grad_(True),
+                                                  attn_mask,
+                                                  position_ids)
                         outs[f_mb] = out
                         aid += 1
 
