@@ -119,66 +119,218 @@ def synth_grad_like(output, seed=4321, std=0.01):
 # args = parser.parse_args()
 
 
+# def main():
+#     device = torch.device("cpu")     
+
+#     name = "Qwen/Qwen3-0.6B"
+#     tok = AutoTokenizer.from_pretrained(name, trust_remote_code=True)
+#     tok.pad_token = tok.eos_token
+#     full = AutoModelForCausalLM.from_pretrained(name, trust_remote_code=True)
+
+#     layers, B, L =8, 8, 256
+    
+#     stage_mod = PartMiddle(full, 0, layers)
+#     stage_mod.to(device)
+    
+#     hidden = synth_hidden(full, B, L, seed=42, device="cpu")
+#     attn_mask = synth_attn_mask(B, L, mode="causal", device="cpu")
+
+#     del full                        
+#     import gc; gc.collect()
+    
+#     from recorder import Recorder
+#     rec =  Recorder(0,mark_actions=False)
+
+#     stage_mod.train(False) 
+
+#     outs = {}
+#     aid = 0 
+
+#     # ---- Warmup: 5 个仅 Forward（mb 0..4）----
+#     for mb in range(5):
+#         with rec.record(batch_id=0, action_id=aid, action="FORWARD", stage_idx=0, mb_idx=mb):
+#             out, attn_mask_used = stage_mod(hidden.clone().requires_grad_(True), attn_mask)
+#         outs[mb] = out
+#         aid += 1
+
+#     # ---- Ordinary: 6 轮（每轮先 F 新 mb，再对最老未回传的做 B）----
+#     for k in range(6):
+#         f_mb = 5 + k           
+#         b_mb = k               
+#         with rec.record(batch_id=0, action_id=aid, action="FORWARD", stage_idx=0, mb_idx=f_mb):
+#             out, attn_mask_used = stage_mod(hidden.clone().requires_grad_(True), attn_mask)
+#         outs[f_mb] = out
+#         aid += 1
+
+#         grad_out = synth_grad_like(outs[b_mb], seed=43 + b_mb)
+#         with rec.record(batch_id=0, action_id=aid, action="FULL_BACKWARD", stage_idx=0, mb_idx=b_mb):
+#             outs[b_mb].backward(grad_out)
+#         del outs[b_mb]
+#         aid += 1
+
+#     print("forward算完了")
+
+#     for b_mb in range(6, 11):
+#         grad_out = synth_grad_like(outs[b_mb], seed=43 + b_mb)
+#         with rec.record(batch_id=0, action_id=aid, action="FULL_BACKWARD", stage_idx=0, mb_idx=b_mb):
+#             outs[b_mb].backward(grad_out)
+#         del outs[b_mb]
+#         aid += 1
+
+#     rec.dump()
+#     print("backward算完了")
+# 在文件顶部的 import 附近补充
+import shutil, glob
+
+# ===== 工具函数：设置所有 policy 的目标频率（kHz），尽量夹紧到硬件范围 =====
+def _set_all_policies_fixed_freq_khz(target_khz: int, verbose: bool = False):
+    base = "/sys/devices/system/cpu/cpufreq"
+    pols = sorted(glob.glob(os.path.join(base, "policy*")))
+    if not pols:
+        if verbose:
+            print("[WARN] 未发现 cpufreq policy 目录，可能系统未暴露调频接口，跳过设频。")
+        return
+    for p in pols:
+        name = os.path.basename(p)
+        try:
+            # 读取硬件上下限，做夹紧
+            hwmin = int(open(os.path.join(p, "cpuinfo_min_freq")).read().strip())
+            hwmax = int(open(os.path.join(p, "cpuinfo_max_freq")).read().strip())
+            t = max(hwmin, min(hwmax, int(target_khz)))
+            gov_path = os.path.join(p, "scaling_governor")
+            av_gov = open(os.path.join(p, "scaling_available_governors")).read().strip().split()
+            # 尝试用 performance 或 userspace（有些平台固定频点需要 userspace）
+            prefer = "userspace" if "userspace" in av_gov else ("performance" if "performance" in av_gov else None)
+            if prefer is not None:
+                with open(gov_path, "w") as f: f.write(prefer)
+            # 写 min/max 为同一频点（即“尽量固定”）
+            with open(os.path.join(p, "scaling_min_freq"), "w") as f: f.write(str(t))
+            with open(os.path.join(p, "scaling_max_freq"), "w") as f: f.write(str(t))
+            if verbose:
+                print(f"[{name}] governor={prefer} set {t/1_000_000:.3f} GHz")
+        except Exception as e:
+            if verbose:
+                print(f"[WARN] 设置 {name} 失败：{e}（继续其它 policy）")
+
+# ===== 工具函数：把本地生成的两个文件移动到目标目录 =====
+def _move_outputs_to_dir(target_dir: str, verbose: bool = False):
+    os.makedirs(target_dir, exist_ok=True)
+    moved_any = False
+    for fname in ["timeline_rank0.json", "cpu_mem_rank0.jsonl"]:
+        if os.path.exists(fname):
+            shutil.move(fname, os.path.join(target_dir, fname))
+            moved_any = True
+            if verbose:
+                print(f"[MOVE] {fname} -> {target_dir}/")
+    if not moved_any and verbose:
+        print(f"[WARN] 未找到需要移动的输出文件（可能本轮未产生或命名不同）。")
+
 def main():
-    device = torch.device("cpu")     
+    device = torch.device("cpu")
 
     name = "Qwen/Qwen3-0.6B"
     tok = AutoTokenizer.from_pretrained(name, trust_remote_code=True)
     tok.pad_token = tok.eos_token
-    full = AutoModelForCausalLM.from_pretrained(name, trust_remote_code=True)
+    full_base = AutoModelForCausalLM.from_pretrained(name, trust_remote_code=True)
 
-    layers, B, L =8, 8, 256
-    
-    stage_mod = PartMiddle(full, 0, layers)
-    stage_mod.to(device)
-    
-    hidden = synth_hidden(full, B, L, seed=42, device="cpu")
-    attn_mask = synth_attn_mask(B, L, mode="causal", device="cpu")
+    L = 256  # 序列长度保持与你原脚本一致
+    # 三重循环参数
+    freqs = [round(1.2 + 0.2*i, 1) for i in range(int((3.2 - 1.2) / 0.2) + 1)] + [3.2]
+    freqs = sorted(set(freqs))  # 防止浮点累加误差
+    layers_list = list(range(1, 11))
+    B_list = list(range(1, 11))
 
-    del full                        
-    import gc; gc.collect()
-    
-    from recorder import Recorder
-    rec =  Recorder(0,mark_actions=False)
+    total = len(freqs) * len(layers_list) * len(B_list)
+    pbar = tqdm(total=total, desc="Grid Running", ncols=100)
 
-    stage_mod.train(False) 
+    try:
+        for f_ghz in freqs:
+            # 设 CPU 频率（kHz）
+            _set_all_policies_fixed_freq_khz(int(f_ghz * 1_000_000), verbose=False)
 
-    outs = {}
-    aid = 0 
+            for layers in layers_list:
+                # 为当前 layers 重新构建 stage 与输入
+                # 复制一个轻量的“中间层切片”模型
+                # 注意：这里基于 full_base 的结构创建 PartMiddle，不重复下载权重
+                full = full_base  # 仅为可读性，实际仍用同一对象
+                stage_mod = PartMiddle(full, 0, layers).to(device)
+                hidden_cache = {}  # 缓存不同 B 的合成输入，减少重复构造
+                attn_cache = {}
 
-    # ---- Warmup: 5 个仅 Forward（mb 0..4）----
-    for mb in range(5):
-        with rec.record(batch_id=0, action_id=aid, action="FORWARD", stage_idx=0, mb_idx=mb):
-            out, attn_mask_used = stage_mod(hidden.clone().requires_grad_(True), attn_mask)
-        outs[mb] = out
-        aid += 1
+                for B in B_list:
+                    # 更新进度条的任务题头
+                    pbar.set_description(f"freq={f_ghz:.1f}GHz layers={layers} B={B}")
+                    # 合成输入
+                    if B not in hidden_cache:
+                        hidden_cache[B] = synth_hidden(full, B, L, seed=42, device=str(device))
+                    if B not in attn_cache:
+                        attn_cache[B] = synth_attn_mask(B, L, mode="causal", device=str(device))
+                    hidden = hidden_cache[B]
+                    attn_mask = attn_cache[B]
 
-    # ---- Ordinary: 6 轮（每轮先 F 新 mb，再对最老未回传的做 B）----
-    for k in range(6):
-        f_mb = 5 + k           
-        b_mb = k               
-        with rec.record(batch_id=0, action_id=aid, action="FORWARD", stage_idx=0, mb_idx=f_mb):
-            out, attn_mask_used = stage_mod(hidden.clone().requires_grad_(True), attn_mask)
-        outs[f_mb] = out
-        aid += 1
+                    # 回收器
+                    from recorder import Recorder
+                    rec = Recorder(0, mark_actions=False)
 
-        grad_out = synth_grad_like(outs[b_mb], seed=43 + b_mb)
-        with rec.record(batch_id=0, action_id=aid, action="FULL_BACKWARD", stage_idx=0, mb_idx=b_mb):
-            outs[b_mb].backward(grad_out)
-        del outs[b_mb]
-        aid += 1
+                    # 1F1B: 5 warmup F，6 轮 (F+B)，再 5 个冷却 B —— 与你之前脚本一致
+                    stage_mod.train(False)
 
-    print("forward算完了")
+                    outs = {}
+                    aid = 0
 
-    for b_mb in range(6, 11):
-        grad_out = synth_grad_like(outs[b_mb], seed=43 + b_mb)
-        with rec.record(batch_id=0, action_id=aid, action="FULL_BACKWARD", stage_idx=0, mb_idx=b_mb):
-            outs[b_mb].backward(grad_out)
-        del outs[b_mb]
-        aid += 1
+                    # Warmup F (5)
+                    for mb in range(5):
+                        with rec.record(batch_id=0, action_id=aid, action="FORWARD", stage_idx=0, mb_idx=mb):
+                            out, attn_mask_used = stage_mod(hidden.clone().requires_grad_(True), attn_mask)
+                        outs[mb] = out
+                        aid += 1
 
-    rec.dump()
-    print("backward算完了")
+                    # Ordinary 6 轮
+                    for k in range(6):
+                        f_mb = 5 + k
+                        b_mb = k
+                        with rec.record(batch_id=0, action_id=aid, action="FORWARD", stage_idx=0, mb_idx=f_mb):
+                            out, attn_mask_used = stage_mod(hidden.clone().requires_grad_(True), attn_mask)
+                        outs[f_mb] = out
+                        aid += 1
+
+                        grad_out = synth_grad_like(outs[b_mb], seed=43 + b_mb)
+                        with rec.record(batch_id=0, action_id=aid, action="FULL_BACKWARD", stage_idx=0, mb_idx=b_mb):
+                            outs[b_mb].backward(grad_out)
+                        del outs[b_mb]
+                        aid += 1
+
+                    # Cooldown B (5)
+                    for b_mb in range(6, 11):
+                        grad_out = synth_grad_like(outs[b_mb], seed=43 + b_mb)
+                        with rec.record(batch_id=0, action_id=aid, action="FULL_BACKWARD", stage_idx=0, mb_idx=b_mb):
+                            outs[b_mb].backward(grad_out)
+                        del outs[b_mb]
+                        aid += 1
+
+                    # dump 到当前目录
+                    rec.dump()
+
+                    # 移动到 ./qwen3_0.6/{cpu_frequence}/{layers}/{mb_size}/
+                    target_dir = os.path.join("qwen3_0.6", f"{f_ghz:.1f}", str(layers), str(B))
+                    _move_outputs_to_dir(target_dir, verbose=False)
+
+                    # 明确显示当前完成项
+                    tqdm.write(f"[DONE] freq={f_ghz:.1f}GHz layers={layers} B={B} -> {target_dir}")
+
+                    # 更新进度
+                    pbar.update(1)
+
+                    # 释放显存/内存（CPU 上主要是 Python 对象）
+                    del rec, outs
+                    import gc; gc.collect()
+
+                # 为不同 layers 释放 stage_mod
+                del stage_mod
+                import gc; gc.collect()
+
+    finally:
+        pbar.close()
 
     
     
