@@ -271,8 +271,8 @@ class Recorder:
                         "rank": s.rank,
                         "batch_id": s.batch_id,
                         "time_ns": s.time_ns,
-                        "cpu_utilization": s.cpu_utilization,
-                        "memory_utilization": s.memory_utilization,
+                        "cpu_utilization": round(s.cpu_utilization, 7),
+                        "memory_utilization": round(s.memory_utilization, 7),
                     }
                     f.write(json.dumps(rec) + "\n")
         except Exception:
