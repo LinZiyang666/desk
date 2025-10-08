@@ -132,48 +132,111 @@ import shutil, glob
 #             if verbose:
 #                 print(f"[WARN] 设置 {name} 失败：{e}（继续其它 policy）")
 
+# ===== 新增：精确限流（cgroups CPU quota，v2 首选，v1 回退）=====
 def _apply_cpu_cap(percent: float, period_us: int = 100000, cgname: str = "prof_cap", verbose: bool = False):
     """
     将当前进程的 CPU 聚合使用率限制为全机总算力的 percent%。
-    - 对 cgroups v2：写入 <cgdir>/cpu.max = "<quota> <period>"
-    - 对 cgroups v1：写入 <cgdir>/cpu.cfs_quota_us 与 cpu.cfs_period_us
-    说明：
-      quota = period_us * (percent/100) * N_cores
-      若 N_cores=16 且 percent=50，则 quota ≈ 8*period（聚合 8 个 CPU 的时间份额）。
+    v2 方案：在“当前进程所在 cgroup 的父目录”下创建子 cgroup，启用父目录 +cpu，再对子级写 cpu.max，并把进程放入子级。
+    v1 方案：创建 cpu controller 的 cgroup，写 cfs_quota/period，并把进程加入 tasks。
     """
+    import errno
     percent = float(max(1.0, min(100.0, percent)))
     ncpu = os.cpu_count() or 1
     quota = int(period_us * (percent / 100.0) * ncpu)
     quota = max(quota, 1000)  # 避免过小导致调度抖动
-
     pid = os.getpid()
     cg_root = "/sys/fs/cgroup"
 
-    # cgroups v2（统一层级）
-    if os.path.exists(os.path.join(cg_root, "cgroup.controllers")):
-        cgdir = os.path.join(cg_root, cgname)
+    # ---------- cgroups v2 ----------
+    controllers_path = os.path.join(cg_root, "cgroup.controllers")
+    if os.path.exists(controllers_path):
+        # 解析当前进程的 cgroup 路径，如 "0::/user.slice/xxx.scope"
+        v2_rel = "/"
+        try:
+            with open("/proc/self/cgroup", "r") as f:
+                for line in f:
+                    # v2 行形如：0::/user.slice/user-0.slice/session-1.scope
+                    parts = line.strip().split(":")
+                    if len(parts) == 3 and parts[0] == "0":
+                        v2_rel = parts[2] or "/"
+                        break
+        except Exception:
+            v2_rel = "/"
+
+        parent_dir = os.path.normpath(os.path.join(cg_root, v2_rel))
+        # 确保父目录存在
+        if not os.path.isdir(parent_dir):
+            parent_dir = cg_root  # 兜底
+
+        # 1) 确保父目录启用了 +cpu 控制器
+        ctrls = ""
+        try:
+            with open(os.path.join(parent_dir, "cgroup.controllers"), "r") as f:
+                ctrls = f.read().strip()
+        except Exception:
+            pass
+        if "cpu" not in ctrls.split():
+            # 父目录没有 cpu 控制器可用（极少见），降级到根去尝试
+            parent_dir = cg_root
+            try:
+                with open(os.path.join(parent_dir, "cgroup.controllers"), "r") as f:
+                    ctrls = f.read().strip()
+            except Exception:
+                ctrls = ""
+
+        # 尝试在 parent_dir 开启 +cpu
+        subtree_ctrl = os.path.join(parent_dir, "cgroup.subtree_control")
+        try:
+            cur = ""
+            try:
+                with open(subtree_ctrl, "r") as f:
+                    cur = f.read().strip()
+            except Exception:
+                cur = ""
+            if "+cpu" not in cur and "cpu" not in cur.split():
+                with open(subtree_ctrl, "w") as f:
+                    f.write("+cpu")
+        except OSError as e:
+            if e.errno in (errno.EPERM, errno.EACCES):
+                raise PermissionError(
+                    f"无法在 {parent_dir} 启用 +cpu（需要在父 cgroup 打开 controller）。"
+                    f"请以 root 执行： echo +cpu > {subtree_ctrl}"
+                ) from e
+            # 其它错误：继续尝试，可能已经启用
+
+        # 2) 在父目录下创建/使用子 cgroup
+        cgdir = os.path.join(parent_dir, cgname)
         os.makedirs(cgdir, exist_ok=True)
-        # 将当前进程加入该 cgroup
+
+        # 3) 写 cpu.max
+        try:
+            with open(os.path.join(cgdir, "cpu.max"), "w") as f:
+                f.write(f"{quota} {period_us}")
+        except OSError as e:
+            if e.errno in (errno.EPERM, errno.EACCES):
+                raise PermissionError(
+                    f"写入 {cgdir}/cpu.max 被拒绝。很可能父目录未启用 +cpu。"
+                    f"请执行： echo +cpu > {subtree_ctrl}"
+                ) from e
+            raise
+
+        # 4) 把当前进程移入子 cgroup
         with open(os.path.join(cgdir, "cgroup.procs"), "w") as f:
             f.write(str(pid))
-        # 设置 CPU 上限
-        with open(os.path.join(cgdir, "cpu.max"), "w") as f:
-            f.write(f"{quota} {period_us}")
+
         if verbose:
-            print(f"[CGv2] cpu.max={quota} {period_us}, percent={percent:.2f}%, cores={ncpu}")
+            print(f"[CGv2] parent={parent_dir}, cpu.max={quota} {period_us}, percent={percent:.2f}%, cores={ncpu}")
         return
 
-    # cgroups v1（分 controller）
+    # ---------- cgroups v1 回退 ----------
     cg_cpu = os.path.join(cg_root, "cpu")
     if os.path.isdir(cg_cpu):
         cgdir = os.path.join(cg_cpu, cgname)
         os.makedirs(cgdir, exist_ok=True)
-        # 设置 period/quota
         with open(os.path.join(cgdir, "cpu.cfs_period_us"), "w") as f:
             f.write(str(period_us))
         with open(os.path.join(cgdir, "cpu.cfs_quota_us"), "w") as f:
             f.write(str(quota))
-        # 将当前进程加入该 cgroup
         with open(os.path.join(cgdir, "tasks"), "w") as f:
             f.write(str(pid))
         if verbose:
