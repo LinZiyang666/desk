@@ -284,7 +284,7 @@ args = parser.parse_args()
 def main():
     device = torch.device("cpu")
 
-    name = "Qwen/Qwen3-1.7B"
+    name = "Qwen/Qwen3-0.6B"
     tok = AutoTokenizer.from_pretrained(name, trust_remote_code=True)
     tok.pad_token = tok.eos_token
     full_base = AutoModelForCausalLM.from_pretrained(name, trust_remote_code=True)
@@ -396,8 +396,8 @@ def main():
                     # dump 到当前目录
                     rec.dump()
 
-                    # 移动到 ./qwen3_1.7B/capXX/{layers}/{mb_size}/
-                    target_dir = os.path.join("qwen3_1.7B", f"cap{int(round(cap)):02d}", str(layers), str(B))
+                    # 移动到 ./qwen3_0.6B/capXX/{layers}/{mb_size}/
+                    target_dir = os.path.join("qwen3_0.6B", f"cap{int(round(cap)):02d}", str(layers), str(B))
                     _move_outputs_to_dir(target_dir, verbose=False)
 
                     # 明确显示当前完成项
