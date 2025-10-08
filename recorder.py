@@ -226,7 +226,7 @@ class Recorder:
                 while not stop_evt.is_set():
                     t_ns = time.time_ns()
                     try:
-                        cpu = float(psutil.cpu_percent(interval=None))  # %
+                        cpu = psutil.cpu_percent(interval=None)  # %
                         mem = float(psutil.virtual_memory().percent)    # %
                         print(cpu)
                     except Exception:
