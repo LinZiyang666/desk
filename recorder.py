@@ -228,6 +228,7 @@ class Recorder:
                     try:
                         cpu = float(psutil.cpu_percent(interval=None))  # %
                         mem = float(psutil.virtual_memory().percent)    # %
+                        print(cpu)
                     except Exception:
                         cpu, mem = -1.0, -1.0
                     with self._sysmon_lock:
