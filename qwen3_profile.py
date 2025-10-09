@@ -397,7 +397,7 @@ def main():
                     rec.dump()
 
                     # 移动到 ./qwen3_0.6B/capXX/{layers}/{mb_size}/
-                    target_dir = os.path.join("qwen3_0.6B", f"cap{int(round(cap)):02d}", str(layers), str(B))
+                    target_dir = os.path.join("qwen3_0.6B", f"cap{cap:.1f}", str(layers), str(B))
                     _move_outputs_to_dir(target_dir, verbose=False)
 
                     # 明确显示当前完成项
