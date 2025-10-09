@@ -143,35 +143,108 @@ def synth_grad_like(output, *, seed=4321, std=0.01):
 
 import shutil, glob
 
-# ===== 工具函数：设置所有 policy 的目标频率（kHz），尽量夹紧到硬件范围 =====
-def _set_all_policies_fixed_freq_khz(target_khz: int, verbose: bool = False):
-    base = "/sys/devices/system/cpu/cpufreq"
-    pols = sorted(glob.glob(os.path.join(base, "policy*")))
-    if not pols:
-        if verbose:
-            print("[WARN] 未发现 cpufreq policy 目录，可能系统未暴露调频接口，跳过设频。")
-        return
-    for p in pols:
-        name = os.path.basename(p)
+def _apply_cpu_cap(percent: float, period_us: int = 100000, cgname: str = "prof_cap", verbose: bool = False):
+    """
+    将当前进程的 CPU 聚合使用率限制为全机总算力的 percent%。
+    v2 方案：在“当前进程所在 cgroup 的父目录”下创建子 cgroup，启用父目录 +cpu，再对子级写 cpu.max，并把进程放入子级。
+    v1 方案：创建 cpu controller 的 cgroup，写 cfs_quota/period，并把进程加入 tasks。
+    """
+    import errno
+    percent = float(max(1.0, min(100.0, percent)))
+    ncpu = os.cpu_count() or 1
+    quota = int(period_us * (percent / 100.0) * ncpu)
+    quota = max(quota, 1000)  # 避免过小导致调度抖动
+    pid = os.getpid()
+    cg_root = "/sys/fs/cgroup"
+
+    # ---------- cgroups v2 ----------
+    controllers_path = os.path.join(cg_root, "cgroup.controllers")
+    if os.path.exists(controllers_path):
+        # 解析当前进程的 cgroup 路径，如 "0::/user.slice/xxx.scope"
+        v2_rel = "/"
         try:
-            # 读取硬件上下限，做夹紧
-            hwmin = int(open(os.path.join(p, "cpuinfo_min_freq")).read().strip())
-            hwmax = int(open(os.path.join(p, "cpuinfo_max_freq")).read().strip())
-            t = max(hwmin, min(hwmax, int(target_khz)))
-            gov_path = os.path.join(p, "scaling_governor")
-            av_gov = open(os.path.join(p, "scaling_available_governors")).read().strip().split()
-            # 尝试用 performance 或 userspace（有些平台固定频点需要 userspace）
-            prefer = "userspace" if "userspace" in av_gov else ("performance" if "performance" in av_gov else None)
-            if prefer is not None:
-                with open(gov_path, "w") as f: f.write(prefer)
-            # 写 min/max 为同一频点（即“尽量固定”）
-            with open(os.path.join(p, "scaling_min_freq"), "w") as f: f.write(str(t))
-            with open(os.path.join(p, "scaling_max_freq"), "w") as f: f.write(str(t))
-            if verbose:
-                print(f"[{name}] governor={prefer} set {t/1_000_000:.3f} GHz")
-        except Exception as e:
-            if verbose:
-                print(f"[WARN] 设置 {name} 失败：{e}（继续其它 policy）")
+            with open("/proc/self/cgroup", "r") as f:
+                for line in f:
+                    parts = line.strip().split(":")
+                    if len(parts) == 3 and parts[0] == "0":
+                        v2_rel = parts[2] or "/"
+                        break
+        except Exception:
+            v2_rel = "/"
+
+        parent_dir = os.path.normpath(os.path.join(cg_root, v2_rel))
+        if not os.path.isdir(parent_dir):
+            parent_dir = cg_root  # 兜底
+
+        # 1) 确保父目录启用了 +cpu 控制器
+        ctrls = ""
+        try:
+            with open(os.path.join(parent_dir, "cgroup.controllers"), "r") as f:
+                ctrls = f.read().strip()
+        except Exception:
+            pass
+        subtree_ctrl = os.path.join(parent_dir, "cgroup.subtree_control")
+        if "cpu" in ctrls:
+            try:
+                with open(subtree_ctrl, "r+") as f:
+                    cur = f.read()
+                if "+cpu" not in cur.split():
+                    with open(subtree_ctrl, "w") as f:
+                        f.write("+cpu")
+            except OSError as e:
+                if e.errno not in (errno.EPERM, errno.EACCES):
+                    raise
+        else:
+            # 父目录没有 cpu 控制器，可能无权限启用；继续尝试，若失败再报错
+            try:
+                with open(subtree_ctrl, "w") as f:
+                    f.write("+cpu")
+            except OSError as e:
+                if e.errno in (errno.EPERM, errno.EACCES):
+                    raise PermissionError(
+                        f"无法在 {parent_dir} 启用 +cpu（需要管理员权限）。"
+                    ) from e
+
+        # 2) 在父目录下创建/使用子 cgroup
+        cgdir = os.path.join(parent_dir, cgname)
+        os.makedirs(cgdir, exist_ok=True)
+
+        # 3) 写 cpu.max
+        try:
+            with open(os.path.join(cgdir, "cpu.max"), "w") as f:
+                f.write(f"{quota} {period_us}")
+        except OSError as e:
+            if e.errno in (errno.EPERM, errno.EACCES):
+                raise PermissionError(
+                    f"写入 {cgdir}/cpu.max 被拒绝。很可能父目录未启用 +cpu。"
+                    f"请执行： echo +cpu > {subtree_ctrl}"
+                ) from e
+            raise
+
+        # 4) 把当前进程移入子 cgroup
+        with open(os.path.join(cgdir, "cgroup.procs"), "w") as f:
+            f.write(str(pid))
+
+        if verbose:
+            print(f"[CGv2] parent={parent_dir}, cpu.max={quota} {period_us}, percent={percent:.2f}%, cores={ncpu}")
+        return
+
+    # ---------- cgroups v1 回退 ----------
+    cg_cpu = os.path.join(cg_root, "cpu")
+    if os.path.isdir(cg_cpu):
+        cgdir = os.path.join(cg_cpu, cgname)
+        os.makedirs(cgdir, exist_ok=True)
+        with open(os.path.join(cgdir, "cpu.cfs_period_us"), "w") as f:
+            f.write(str(period_us))
+        with open(os.path.join(cgdir, "cpu.cfs_quota_us"), "w") as f:
+            f.write(str(quota))
+        with open(os.path.join(cgdir, "tasks"), "w") as f:
+            f.write(str(pid))
+        if verbose:
+            print(f"[CGv1] cpu.cfs_quota_us={quota} cpu.cfs_period_us={period_us}, percent={percent:.2f}%, cores={ncpu}")
+        return
+
+    raise RuntimeError("未检测到 cgroups v2 或 v1，无法应用 CPU cap。")
 
 # ===== 工具函数：把本地生成的两个文件移动到目标目录 =====
 def _move_outputs_to_dir(target_dir: str, verbose: bool = False):
@@ -190,13 +263,13 @@ def _move_outputs_to_dir(target_dir: str, verbose: bool = False):
 
 parser = argparse.ArgumentParser()
 parser.add_argument(
-    "--freq-range", type=float, nargs=2, metavar=("START", "END"),
-    default=[1.2, 3.2],
-    help="CPU frequency sweep range in GHz, e.g. --freq-range 1.2 3.2"
+    "--cpu-cap-range", type=float, nargs=2, metavar=("START%", "END%"),
+    default=[30.0, 100.0],
+    help="CPU max utilization sweep range in percent of TOTAL machine CPU, e.g. --cpu-cap-range 30 100"
 )
 parser.add_argument(
-    "--freq-step", type=float, default=0.2,
-    help="CPU frequency sweep step in GHz, e.g. --freq-step 0.2"
+    "--cpu-cap-step", type=float, default=10.0,
+    help="Sweep step (percent), e.g. --cpu-cap-step 10"
 )
 args = parser.parse_args()
 def main():
@@ -209,9 +282,9 @@ def main():
     from decimal import Decimal, getcontext
     getcontext().prec = 6   # 足够处理一位小数
 
-    def build_freqs(start: float, end: float, step: float):
+    def build_caps(start: float, end: float, step: float):
         if step <= 0:
-            raise ValueError("freq-step must be > 0")
+            raise ValueError("cpu-cap-step must be > 0")
         if end < start:
             # 允许用户反写，自动交换
             start, end = end, start
@@ -233,19 +306,22 @@ def main():
         return vals
 
     # 在 main() 或你需要的地方使用：
-    start, end = args.freq_range
-    step = args.freq_step
-    freqs = build_freqs(start, end, step)
-    layers_list = list(range(1, 11))
-    B_list = list(range(1, 11))
+    start, end = args.cpu_cap_range
+    step = args.cpu_cap_step
+    caps = build_caps(start, end, step)
+    # layers_list = list(range(1, 11))
+    # B_list = list(range(1, 11))
+    layers_list = list(range(7, 8))
+    B_list = list(range(7, 8))
 
-    total = len(freqs) * len(layers_list) * len(B_list)
+
+    total = len(caps) * len(layers_list) * len(B_list)
     pbar = tqdm(total=total, desc="Grid Running", ncols=100)
 
     try:
-        for f_ghz in freqs:
-            # 设 CPU 频率（kHz）
-            _set_all_policies_fixed_freq_khz(int(f_ghz * 1_000_000), verbose=False)
+        for cap in caps:
+            # 应用 CPU cap（cgroups 限流）
+            _apply_cpu_cap(cap, verbose=False)
 
             for layers in layers_list:
                 # 为当前 layers 重新构建 stage 与输入
@@ -259,7 +335,7 @@ def main():
 
                 for B in B_list:
                     # 更新进度条的任务题头
-                    pbar.set_description(f"freq={f_ghz:.1f}GHz layers={layers} B={B}")
+                    pbar.set_description(f"cap={cap:.1f}% layers={layers} B={B}")
                     # 合成输入
                     if B not in hidden_cache:
                         hidden_cache[B] = synth_hidden(full, B, L, seed=42, device=str(device))
@@ -319,11 +395,11 @@ def main():
                     rec.dump()
 
                     # 移动到 ./qwen3_0.6/{cpu_frequence}/{layers}/{mb_size}/
-                    target_dir = os.path.join("qwen2.5_omni", f"{f_ghz:.1f}", str(layers), str(B))
+                    target_dir = os.path.join("qwen2.5_omni", f"{cap:.1f}", str(layers), str(B))
                     _move_outputs_to_dir(target_dir, verbose=False)
 
                     # 明确显示当前完成项
-                    tqdm.write(f"[DONE] freq={f_ghz:.1f}GHz layers={layers} B={B} -> {target_dir}")
+                    tqdm.write(f"[DONE] cap={cap:.1f}% layers={layers} B={B} -> {target_dir}")
 
                     # 更新进度
                     pbar.update(1)
