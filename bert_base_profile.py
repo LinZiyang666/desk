@@ -76,16 +76,14 @@ class PartMiddle(nn.Module):
 
         # 逐层执行 BertLayer。BertLayer.forward 返回新的 hidden_states（tensor）
         for layer in self.layers:
-            hidden = layer(
+            out = layer(
                 hidden_states=hidden,
                 attention_mask=attn_mask_4d,
                 encoder_hidden_states=encoder_hidden_states,
                 encoder_attention_mask=enc_attn_mask_4d,
-                past_key_value=None,
-                cache_position=None,
+                output_attentions=False,
             )
-
-        return hidden.contiguous(), attn_mask_4d  
+            hidden = out[0] if isinstance(out, tuple) else out
 
 def synth_hidden(model, B, L, seed=1234, device="cpu", dtype=None, std=0.02):
     """造 [B, L, H] 的 hidden，确定性高斯分布。"""
