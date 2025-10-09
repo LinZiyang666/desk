@@ -31,8 +31,7 @@ class PartMiddle(nn.Module):
     """
     def __init__(self, model, start: int, end: int):
         super().__init__()
-        # HuggingFace BERT 的 encoder 层在 model.bert.encoder.layer 中
-        self.layers = nn.ModuleList(model.bert.encoder.layer[start:end])
+        self.layers = nn.ModuleList(model.encoder.layer[start:end])
 
     @staticmethod
     def _to_4d_attn_mask(attn_mask: torch.Tensor,
