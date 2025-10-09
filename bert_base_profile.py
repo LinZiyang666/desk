@@ -84,6 +84,8 @@ class PartMiddle(nn.Module):
                 output_attentions=False,
             )
             hidden = out[0] if isinstance(out, tuple) else out
+        
+        return hidden.contiguous(), attn_mask_4d
 
 def synth_hidden(model, B, L, seed=1234, device="cpu", dtype=None, std=0.02):
     """造 [B, L, H] 的 hidden，确定性高斯分布。"""
