@@ -1,9 +1,9 @@
 import json
-from typing import Any, Dict, List, Union
+from typing import Any, Dict, List, Union, Optional
 import argparse, os, torch, torch.nn as nn, torch.nn.functional as F, torch.optim as optim
 import torch.distributed as dist
 
-from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer, AutoModel
 from datasets import load_dataset
 from tqdm import tqdm
 import time
@@ -19,33 +19,73 @@ from simple_1F1B_Action import generate_1f1b_pipeline_actions, generate_1f1b_pip
 torch.set_num_threads(16)
 
 class PartMiddle(nn.Module):
-    """公共基类：仅负责若干 transformer layer。"""
-    def __init__(self, model, start, end):
+    """
+    BERT 版中段模块：仅串行执行若干 BertLayer。
+    传入:
+      hidden: (bsz, seqlen, hidden_size) 来自前一段（或 embeddings 之后）
+      attn_mask: 可以是 2D (bsz, seqlen)、3D (bsz, tgt, src) 或 4D (bsz, 1, tgt, src)。
+                 内部会转为 4D 加性 mask（被遮蔽位置加上 -inf）。
+      encoder_hidden_states / encoder_attention_mask: 若需要 cross-attn（一般 BERT encoder 不用）。
+    返回:
+      hidden_out, attn_mask_4d
+    """
+    def __init__(self, model, start: int, end: int):
         super().__init__()
-        self.layers = nn.ModuleList(model.model.layers[start:end])
-        self.rotary_emb = model.model.rotary_emb
+        self.layers = nn.ModuleList(model.encoder.layer[start:end])
 
-    def forward(self, hidden, attn_mask):
-        bsz, seqlen = hidden.shape[:2]
-        device = hidden.device
-        position_ids = torch.arange(seqlen, device=device).unsqueeze(0).expand(bsz, -1)
-        pos_emb = self.rotary_emb(hidden, position_ids)
+    @staticmethod
+    def _to_4d_attn_mask(attn_mask: torch.Tensor,
+                         hidden: torch.Tensor) -> torch.Tensor:
+        """
+        将 2D/3D 的注意力 mask 规范成 4D 加性 mask:
+          2D: (bsz, src) -> (bsz, 1, 1, src) with 0 for keep, -inf for mask
+          3D: (bsz, tgt, src) -> (bsz, 1, tgt, src)
+          4D: 原样返回
+        """
+        if attn_mask is None:
+            return None
 
-        if attn_mask.dim() == 2:                       # 兼容单矩阵传递
-            attn_mask = torch.triu(
-                torch.full((seqlen, seqlen), float('-inf'), device=device), 1
-            ).unsqueeze(0).unsqueeze(0).expand(bsz, 1, -1, -1).contiguous()
-        elif not attn_mask.is_contiguous():
-            attn_mask = attn_mask.contiguous()
+        dtype = hidden.dtype
+        # 选择一个足够小的负值；对 fp16/bf16 用 finfo.min 可能过小，通常用 -1e4/-1e9 即可。
+        neg_inf = torch.finfo(dtype).min if dtype.is_floating_point else -1e9
 
+        if attn_mask.dim() == 2:
+            # 约定: 1 表示可见，0 表示 padding/不可见
+            add_mask = (1 - attn_mask.to(dtype=dtype)) * neg_inf
+            return add_mask[:, None, None, :]  # (bsz, 1, 1, src)
+        elif attn_mask.dim() == 3:
+            return attn_mask.to(dtype=dtype)[:, None, :, :]  # (bsz, 1, tgt, src)
+        elif attn_mask.dim() == 4:
+            return attn_mask.to(dtype=dtype)
+        else:
+            raise ValueError(f"Unsupported attention mask dim: {attn_mask.dim()}")
+
+    def forward(
+        self,
+        hidden: torch.Tensor,
+        attn_mask: Optional[torch.Tensor] = None,
+        encoder_hidden_states: Optional[torch.Tensor] = None,
+        encoder_attention_mask: Optional[torch.Tensor] = None,
+    ):
+        # 规范化自注意力与（若用到）交叉注意力的 mask
+        attn_mask_4d = self._to_4d_attn_mask(attn_mask, hidden) if attn_mask is not None else None
+        enc_attn_mask_4d = (
+            self._to_4d_attn_mask(encoder_attention_mask, hidden)
+            if encoder_attention_mask is not None else None
+        )
+
+        # 逐层执行 BertLayer。BertLayer.forward 返回新的 hidden_states（tensor）
         for layer in self.layers:
-            hidden = layer(hidden_states=hidden,
-                           attention_mask=attn_mask,
-                           position_ids=position_ids,
-                           position_embeddings=pos_emb,
-                           output_attentions=False,
-                           use_cache=False)[0]
-        return hidden.contiguous(), attn_mask          
+            out = layer(
+                hidden_states=hidden,
+                attention_mask=attn_mask_4d,
+                encoder_hidden_states=encoder_hidden_states,
+                encoder_attention_mask=enc_attn_mask_4d,
+                output_attentions=False,
+            )
+            hidden = out[0] if isinstance(out, tuple) else out
+        
+        return hidden.contiguous(), attn_mask_4d
 
 def synth_hidden(model, B, L, seed=1234, device="cpu", dtype=None, std=0.02):
     """造 [B, L, H] 的 hidden，确定性高斯分布。"""
@@ -65,20 +105,22 @@ _mask_cache = {}
 
 def synth_attn_mask(B, L, mode="causal", window=None, device="cpu"):
     """
-    生成 attention_mask：
-    - 'causal': 传 2D (B, L) 的占位，触发你 PartMiddle 里“内部构造因果掩码”的路径（统一且重现）。
-    - 'sliding': 生成 4D (B, 1, L, L) 的带状 -inf 掩码，近似 SWA 的计算图复杂度。
-    - 'dense':   生成 4D 全 0 掩码（无屏蔽，测算子上界）。
+    生成 attention_mask（适配 BERT 的加性/可见性语义）：
+    - 'causal' :（在 BERT 中无因果遮罩）这里重定义为 **2D padding 可见性** 占位：(B, L)，1 表示可见、0 表示 padding。
+                 交给 PartMiddle(BERT) 内部转换为 4D 加性 mask（被遮蔽处加 -inf）。
+    - 'sliding': 生成 4D (B, 1, L, L) 的带状加性掩码（带外为 -inf），用于模拟局部注意的复杂度。
+    - 'dense'  : 生成 4D 全 0 加性掩码（完全可见）。
     """
     key = (B, L, mode, window)
     if key in _mask_cache:
         return _mask_cache[key]
 
     if mode == "causal":
-        # 传 2D 占位（例如全 1），你的 PartMiddle 会内部构造三角 causal mask
-        attn_mask = torch.ones((B, L), dtype=torch.bool, device=device)
+        # 在 BERT 中，“causal”不成立；此处用 2D 可见性 mask 代替（无 padding 就是全 1）
+        attn_mask = torch.ones((B, L), dtype=torch.int64, device=device)
     elif mode == "sliding":
         assert window is not None and window > 0, "sliding 模式需要 window"
+        # 4D 加性掩码：带外 -inf，带内 0
         base = torch.full((L, L), float("-inf"), device=device)
         # 仅允许 [i-window+1, i] 之间注意
         for i in range(L):
@@ -254,10 +296,13 @@ args = parser.parse_args()
 def main():
     device = torch.device("cpu")
 
-    name = "Qwen/Qwen3-1.7B"
-    tok = AutoTokenizer.from_pretrained(name, trust_remote_code=True)
-    tok.pad_token = tok.eos_token
-    full_base = AutoModelForCausalLM.from_pretrained(name, trust_remote_code=True)
+    # 使用 BERT base 作为被切分的 encoder
+    name = "bert-base-uncased"
+    tok = AutoTokenizer.from_pretrained(name)
+    # BERT 自带 [PAD]；若不存在则回退
+    if tok.pad_token is None:
+        tok.pad_token = "[PAD]"
+    full_base = AutoModel.from_pretrained(name)
 
     L = 256 
     from decimal import Decimal, getcontext
@@ -365,8 +410,8 @@ def main():
                     # dump 到当前目录
                     rec.dump()
 
-                    # 移动到 ./qwen3_1.7B/capXX/{layers}/{mb_size}/
-                    target_dir = os.path.join("qwen3_1.7B", f"cap{cap:.1f}", str(layers), str(B))
+                    # 移动到 ./bert_base/capXX/{layers}/{mb_size}/
+                    target_dir = os.path.join("bert_base", f"cap{cap:.1f}", str(layers), str(B))
                     _move_outputs_to_dir(target_dir, verbose=False)
 
                     # 明确显示当前完成项
