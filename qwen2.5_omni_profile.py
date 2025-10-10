@@ -311,8 +311,8 @@ def main():
     caps = build_caps(start, end, step)
     # layers_list = list(range(1, 11))
     # B_list = list(range(1, 11))
-    layers_list = list(range(7, 8))
-    B_list = list(range(7, 8))
+    layers_list = list(range(1, 8))
+    B_list = list(range(1, 8))
 
 
     total = len(caps) * len(layers_list) * len(B_list)
