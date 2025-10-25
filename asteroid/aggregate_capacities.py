@@ -22,15 +22,22 @@ import argparse, json, statistics
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--inputs", nargs="+", required=True)
-    ap.add_argument("--ref_host", required=True)
-    ap.add_argument("--out", required=True)
+    #we just let the first one becomes reference host...
+    #ap.add_argument("--ref_host", required=True)
+    ap.add_argument("--out", default="capacities.json")
     args = ap.parse_args()
 
     datas = [json.load(open(p,"r")) for p in args.inputs]
-    by_host = {d["host"]: d for d in datas}
-    assert args.ref_host in by_host, "ref_host not in inputs"
+    by_host = {}
+    for i in range(len(datas)):
+        name = str(datas[i]["host"]) + f'_{i}'
+        by_host[name] = datas[i]
+    #{d["host"]: d for d in datas}
+    #assert args.ref_host in by_host, "ref_host not in inputs"
 
-    ref = by_host[args.ref_host]
+
+    ref = by_host[name]
+    ref_host = name
     B = ref["batch"]; T = ref["seq_len"]
 
     caps = {}
@@ -42,7 +49,7 @@ def main():
                 r.append(lr["forward_time_s"] / max(lh["forward_time_s"], 1e-9))
         caps[host] = float(statistics.median(r)) if r else 1.0
 
-    json.dump({"batch": B, "seq_len": T, "ref_host": args.ref_host, "capacity": caps}, open(args.out,"w"), indent=2)
+    json.dump({"batch": B, "seq_len": T, "ref_host": ref_host, "capacity": caps}, open(args.out,"w"), indent=2)
 
 if __name__ == "__main__":
     main()

@@ -52,6 +52,7 @@ def main():
     ap.add_argument("--tied_embed", type=str, default="true", choices=["true","false"])
     ap.add_argument("--max_stages", default=None)
     ap.add_argument("--out_dir", default="out_measured")
+    ap.add_argument("--nbatch", default=5)
     args = ap.parse_args()
 
     layers = json.load(open(args.layers,"r"))
@@ -88,9 +89,10 @@ def main():
     tb_ref = [max(1e-9, lr["backward_time_s"] if lr["backward_time_s"]>0 else lr["forward_time_s"]*2.0) for lr in layers["layers"]]  # fallback if bwd missing
 
     def latency_of_layer(dev_name: str, layer_idx: int, batch: int):
-        assert batch == B, "Measured times are for batch=%d; please measure again for batch=%d" % (B, batch)
+        #assert batch == B, "Measured times are for batch=%d; please measure again for batch=%d" % (B, batch)
+        scale = batch/B
         cap = max(dev_caps.get(dev_name,1.0), 1e-6)
-        return tf_ref[layer_idx] / cap, tb_ref[layer_idx] / cap
+        return tf_ref[layer_idx] / cap *scale, tb_ref[layer_idx] / cap*scale
 
     # Memory model fitted from measurements
     base = float(mm["base"]); alpha = float(mm["alpha"]); Kp = float(mm["Kp"])
@@ -109,7 +111,7 @@ def main():
         devices=devices,
         bandwidth_matrix=bm,
         micro_batch_size=B,
-        num_micro_batches=layers.get("num_micro_batches", 8),
+        num_micro_batches=layers.get("num_micro_batches", int(args.nbatch)),
         latency_of_layer=latency_of_layer,
         memory_of_stage=memory_of_stage,
         allocate_fn=allocate_microbatch_samples,
