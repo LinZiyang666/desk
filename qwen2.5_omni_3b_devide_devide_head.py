@@ -1235,7 +1235,7 @@ def main():
                             group=dist.group.WORLD,
                             prev_group=[0,1,2], this_group=[3], next_group=[4],
                             model_type = "packing",
-                            mm_prev_groups = {"audio":[0],"vision":[1],"text":[2]})
+                            mm_prev_groups = {"audio":[6],"vision":[1],"text":[2]})
         setattr(stage, "modal_type", "packing")
     elif rank == 4:
         stage_mod = Stage2(text_model, L1, L2)
