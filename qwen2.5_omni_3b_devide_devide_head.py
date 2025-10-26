@@ -1199,12 +1199,10 @@ def main():
     elif rank == 6:
         stage_mod = AudioEncoderMidFive(audio_enc)
         stage_mod.to(device)
-        stage = PipelineStage_Multimodality(stage_mod, stage_index=0,
+        stage = PipelineStage_with_mutiple_ranks(stage_mod, stage_index=0,
                             num_stages=world, device=device,
                             group=dist.group.WORLD,
-                            prev_group=[0], this_group=[6], next_group=[3],
-                            model_type = "audio",
-                            mm_prev_groups = None)
+                            prev_group=[0], this_group=[6], next_group=[3])
         setattr(stage, "modal_type", "audio")
     elif rank == 1:
         stage_mod = VisionStage(vision_enc)
