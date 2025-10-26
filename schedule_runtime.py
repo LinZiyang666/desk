@@ -1020,6 +1020,9 @@ class PipelineScheduleRuntimeWithDirection(schedule.PipelineScheduleMulti):
                
                 rank = action.rank
                 dest_rank = action.dest_rank
+                mapped_dest_rank = None
+                if dest_rank is not None and hasattr(stage, "stage_index_to_group_rank"):
+                    mapped_dest_rank = stage.stage_index_to_group_rank.get(dest_rank, dest_rank)
 
                 if comp_type not in (UNSHARD, RESHARD, ALL_REDUCE):
                     assert mb_ids and all(m >= 0 for m in mb_ids), \
@@ -1059,7 +1062,7 @@ class PipelineScheduleRuntimeWithDirection(schedule.PipelineScheduleMulti):
                             stage.get_fwd_send_ops(
                                 mb_index,
                                 rank=rank,
-                                dest_rank=dest_rank,
+                                dest_rank=mapped_dest_rank,
                                 num_splits=num_splits,
                                 modality=m,
                             )
@@ -1067,7 +1070,7 @@ class PipelineScheduleRuntimeWithDirection(schedule.PipelineScheduleMulti):
                             else stage.get_fwd_send_ops(
                                 mb_index,
                                 rank=None,
-                                dest_rank=None,
+                                dest_rank=mapped_dest_rank,
                                 num_splits=num_splits,
                                 modality=m,
                             )
@@ -1088,12 +1091,12 @@ class PipelineScheduleRuntimeWithDirection(schedule.PipelineScheduleMulti):
                         if has_mm_api:
                             if rank is not None and dest_rank is not None:
                                 ops = stage.get_fwd_send_ops_mm(
-                                    mb_index, rank=rank, dest_rank=dest_rank,
+                                    mb_index, rank=rank, dest_rank=mapped_dest_rank,
                                     modality=m, num_splits=num_splits
                                 )
                             else:
                                 ops = stage.get_fwd_send_ops_mm(
-                                    mb_index, rank=None, dest_rank=None,
+                                    mb_index, rank=None, dest_rank=mapped_dest_rank,
                                     modality=m, num_splits=num_splits
                                 )
                             plan = stage._last_comm_plan.get(("SEND_F", mb_index, m), [len(ops)])
@@ -1103,7 +1106,7 @@ class PipelineScheduleRuntimeWithDirection(schedule.PipelineScheduleMulti):
                                 stage.get_fwd_send_ops(
                                     mb_index,
                                     rank=rank,
-                                    dest_rank=dest_rank,
+                                    dest_rank=mapped_dest_rank,
                                     num_splits=num_splits,
                                     modality=m,
                                 )
@@ -1111,7 +1114,7 @@ class PipelineScheduleRuntimeWithDirection(schedule.PipelineScheduleMulti):
                                 else stage.get_fwd_send_ops(
                                     mb_index,
                                     rank=None,
-                                    dest_rank=None,
+                                    dest_rank=mapped_dest_rank,
                                     num_splits=num_splits,
                                     modality=m,
                                 )
@@ -1214,11 +1217,11 @@ class PipelineScheduleRuntimeWithDirection(schedule.PipelineScheduleMulti):
 
                         if rank is not None and dest_rank is not None:
                             ops = stage.get_fwd_recv_ops_mm(
-                                mb_index, rank=rank, dest_rank=dest_rank, modality=m, num_splits=num_splits
+                                mb_index, rank=rank, dest_rank=mapped_dest_rank, modality=m, num_splits=num_splits
                             )
                         else:
                             ops = stage.get_fwd_recv_ops_mm(
-                                mb_index, rank=None, dest_rank=None, modality=m, num_splits=num_splits
+                                mb_index, rank=None, dest_rank=mapped_dest_rank, modality=m, num_splits=num_splits
                             )
                         plan = stage._last_comm_plan.get(("RECV_F", mb_index, m), [len(ops)])
 
@@ -1250,7 +1253,7 @@ class PipelineScheduleRuntimeWithDirection(schedule.PipelineScheduleMulti):
                             ops = stage.get_fwd_recv_ops(
                                 mb_index,
                                 rank=rank,
-                                dest_rank=dest_rank,
+                                dest_rank=mapped_dest_rank,
                                 num_splits=num_splits,
                                 modality=m,
                             )
@@ -1258,7 +1261,7 @@ class PipelineScheduleRuntimeWithDirection(schedule.PipelineScheduleMulti):
                             ops = stage.get_fwd_recv_ops(
                                 mb_index,
                                 rank=None,
-                                dest_rank=None,
+                                dest_rank=mapped_dest_rank,
                                 num_splits=num_splits,
                                 modality=m,
                             )

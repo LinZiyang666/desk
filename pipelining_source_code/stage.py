@@ -365,6 +365,11 @@ class _PipelineStageBase(ABC):
                 continue
 
             peer_rank = self.stage_index_to_group_rank[info.source]
+            if modality is not None and direction == 0:
+                print(
+                    f"[stage {self.stage_index}] recv slot{slot_idx} src_stage={info.source} "
+                    f"mapped_rank={peer_rank} modality={modality}"
+                )
             peer_global_rank = (
                 peer_rank
                 if self.group is None
