@@ -1307,12 +1307,7 @@ class PipelineScheduleRuntimeWithDirection(schedule.PipelineScheduleMulti):
                                         self._fwd_recv_posted[key_m].wait()
                                         with self._async_recv_lock:
                                             works = self._fwd_recv_works.pop(key_m, [])
-                                        # if works and not all(w.is_completed() for  w in works):
-                                        #     enter(0)
-                                        #     print(f"FORWARD {action_id} 进入wait")
-                                        #     schedule._wait_batch_p2p(works)
-                                        #     print(f"FORWARD {action_id} 离开wait")
-                                        #     leave(0)
+                                        print("模态等待")
                                         while not all(w.is_completed() for w in works):
                                             time.sleep(0.001)
                                         self._fwd_recv_posted.pop(key_m, None)
@@ -1328,12 +1323,7 @@ class PipelineScheduleRuntimeWithDirection(schedule.PipelineScheduleMulti):
                                     with self._async_recv_lock:
                                         works_count = len(self._fwd_recv_works.get(key, []))
                                         works = self._fwd_recv_works.pop(key, [])
-                                    # if works and not all(w.is_completed() for  w in works):
-                                    #     enter(0)
-                                    #     print(f"FORWARD {action_id} 进入wait")
-                                    #     schedule._wait_batch_p2p(works)
-                                    #     print(f"FORWARD {action_id} 离开wait")
-                                    #     leave(0)
+                                    print("常规等待")
                                     while not all(w.is_completed() for w in works):
                                         time.sleep(0.001)
                                         

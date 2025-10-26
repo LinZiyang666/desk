@@ -946,37 +946,37 @@ def create_pipeline_actions():
     ]
     
     rank6_actions = [
-        _Action(0, 6, 0, _ComputationType.RECV_F, (0,), 0, None, None, None, None),
-        _Action(0, 6, 1, _ComputationType.FORWARD, (0), None, None, None, None, None),
-        _Action(0, 6, 2, _ComputationType.SEND_F, (0,), 3, None, None, None, None),
+        _Action(0, 6, 0, _ComputationType.RECV_F, (0,), 0, None, None, None, None, ["audio"]),
+        _Action(0, 6, 1, _ComputationType.FORWARD, (0), None, None, None, None, None, ["audio"]),
+        _Action(0, 6, 2, _ComputationType.SEND_F, (0,), 3, None, None, None, None, ["audio"]),
     
-        _Action(0, 6, 3, _ComputationType.RECV_F, (1,), 0, None, None, None, None),
-        _Action(0, 6, 4, _ComputationType.FORWARD, (1), None, None, None, None, None),
-        _Action(0, 6, 5, _ComputationType.SEND_F, (1,), 3, None, None, None, None),
+        _Action(0, 6, 3, _ComputationType.RECV_F, (1,), 0, None, None, None, None, ["audio"]),
+        _Action(0, 6, 4, _ComputationType.FORWARD, (1), None, None, None, None, None, ["audio"]),
+        _Action(0, 6, 5, _ComputationType.SEND_F, (1,), 3, None, None, None, None, ["audio"]),
     
-        _Action(0, 6, 6, _ComputationType.RECV_F, (2,), 0, None, None, None, None),
-        _Action(0, 6, 7, _ComputationType.FORWARD, (2), None, None, None, None, None),
-        _Action(0, 6, 8, _ComputationType.SEND_F, (2,), 3, None, None, None, None),
+        _Action(0, 6, 6, _ComputationType.RECV_F, (2,), 0, None, None, None, None, ["audio"]),
+        _Action(0, 6, 7, _ComputationType.FORWARD, (2), None, None, None, None, None, ["audio"]),
+        _Action(0, 6, 8, _ComputationType.SEND_F, (2,), 3, None, None, None, None, ["audio"]),
     
-        _Action(0, 6, 9, _ComputationType.RECV_F, (3,), 0, None, None, None, None),
-        _Action(0, 6, 10, _ComputationType.FORWARD, (3), None, None, None, None, None),
-        _Action(0, 6, 11, _ComputationType.SEND_F, (3,), 3, None, None, None, None),
+        _Action(0, 6, 9, _ComputationType.RECV_F, (3,), 0, None, None, None, None, ["audio"]),
+        _Action(0, 6, 10, _ComputationType.FORWARD, (3), None, None, None, None, None, ["audio"]),
+        _Action(0, 6, 11, _ComputationType.SEND_F, (3,), 3, None, None, None, None, ["audio"]),
         
-        _Action(0, 6, 12, _ComputationType.RECV_B, (0,), 3, None, None, None, None),
-        _Action(0, 6, 13, _ComputationType.FULL_BACKWARD, (0), None, None, None, None, None),
-        _Action(0, 6, 14, _ComputationType.SEND_B, (0,), 0, None, None, None, None),
+        _Action(0, 6, 12, _ComputationType.RECV_B, (0,), 3, None, None, None, None, ["audio"]),
+        _Action(0, 6, 13, _ComputationType.FULL_BACKWARD, (0), None, None, None, None, None, ["audio"]),
+        _Action(0, 6, 14, _ComputationType.SEND_B, (0,), 0, None, None, None, None, ["audio"]),
     
-        _Action(0, 6, 15, _ComputationType.RECV_B, (1,), 3, None, None, None, None),
-        _Action(0, 6, 16, _ComputationType.FULL_BACKWARD, (1), None, None, None, None, None),
-        _Action(0, 6, 17, _ComputationType.SEND_B, (1,), 0, None, None, None, None),
+        _Action(0, 6, 15, _ComputationType.RECV_B, (1,), 3, None, None, None, None, ["audio"]),
+        _Action(0, 6, 16, _ComputationType.FULL_BACKWARD, (1), None, None, None, None, None, ["audio"]),
+        _Action(0, 6, 17, _ComputationType.SEND_B, (1,), 0, None, None, None, None, ["audio"]),
     
-        _Action(0, 6, 18, _ComputationType.RECV_B, (2,), 3, None, None, None, None),
-        _Action(0, 6, 19, _ComputationType.FULL_BACKWARD, (2), None, None, None, None, None),
-        _Action(0, 6, 20, _ComputationType.SEND_B, (2,), 0, None, None, None, None),
+        _Action(0, 6, 18, _ComputationType.RECV_B, (2,), 3, None, None, None, None, ["audio"]),
+        _Action(0, 6, 19, _ComputationType.FULL_BACKWARD, (2), None, None, None, None, None, ["audio"]),
+        _Action(0, 6, 20, _ComputationType.SEND_B, (2,), 0, None, None, None, None, ["audio"]),
     
-        _Action(0, 6, 21, _ComputationType.RECV_B, (3,), 3, None, None, None, None),
-        _Action(0, 6, 22, _ComputationType.FULL_BACKWARD, (3), None, None, None, None, None),
-        _Action(0, 6, 23, _ComputationType.SEND_B, (3,), 0, None, None, None, None),
+        _Action(0, 6, 21, _ComputationType.RECV_B, (3,), 3, None, None, None, None, ["audio"]),
+        _Action(0, 6, 22, _ComputationType.FULL_BACKWARD, (3), None, None, None, None, None, ["audio"]),
+        _Action(0, 6, 23, _ComputationType.SEND_B, (3,), 0, None, None, None, None, ["audio"]),
     ]
 
     rank1_actions = [
