@@ -1551,12 +1551,7 @@ class PipelineScheduleRuntimeWithDirection(schedule.PipelineScheduleMulti):
                                     with self._async_recv_lock:
                                         works = self._bwd_recv_works.pop(key_m, [])
                                     
-                                    # if works and not all(w.is_completed() for  w in works):
-                                    #     enter(0)
-                                    #     print(f"BACKWARD {action_id} 进入wait")
-                                    #     schedule._wait_batch_p2p(works)
-                                    #     print(f"BACKWARD {action_id} 离开wait")
-                                    #     leave(0)
+                                    print("等待第一")
                                     while not all(w.is_completed() for w in works):
                                         time.sleep(0.001)
                                     
@@ -1572,12 +1567,7 @@ class PipelineScheduleRuntimeWithDirection(schedule.PipelineScheduleMulti):
                                     with self._async_recv_lock:
                                         works = self._bwd_recv_works.pop(key, [])
                                     
-                                    # if works and not all(w.is_completed() for  w in works):
-                                    #     enter(0)
-                                    #     print(f"BACKWARD {action_id} 进入wait")
-                                    #     schedule._wait_batch_p2p(works)
-                                    #     print(f"BACKWARD {action_id} 离开wait")
-                                    #     leave(0)
+                                    print("等待第二")
                                     while not all(w.is_completed() for w in works):
                                         time.sleep(0.001)
                                     
