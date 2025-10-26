@@ -1231,7 +1231,7 @@ def main():
         stage = PipelineStage_Multimodality(stage_mod, stage_index=1,
                             num_stages=world, device=device,
                             group=dist.group.WORLD,
-                            prev_group=[0,1,2], this_group=[3], next_group=[4],
+                            prev_group=[6,1,2], this_group=[3], next_group=[4],
                             model_type = "packing",
                             mm_prev_groups = {"audio":[6],"vision":[1],"text":[2]})
         setattr(stage, "modal_type", "packing")
