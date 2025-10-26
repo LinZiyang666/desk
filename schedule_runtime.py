@@ -1545,6 +1545,7 @@ class PipelineScheduleRuntimeWithDirection(schedule.PipelineScheduleMulti):
                         mods = tuple(action.multimodality or [])
                         if is_head_modal and mods:
                             m = mods[0]  # SEND/RECV 類命令每条只有一个模态
+                            print("到这里1")
                             for mid in mb_ids:
                                 key_m = (stage_idx, mid, m)
                                 if key_m in self._bwd_recv_posted:
@@ -1561,6 +1562,7 @@ class PipelineScheduleRuntimeWithDirection(schedule.PipelineScheduleMulti):
                                     if hasattr(stage, "finish_bwd_recv_mm"):
                                         stage.finish_bwd_recv_mm(mid, m)
                         else:
+                            print("到这里2")
                             for mid in mb_ids:
                                 key = (stage_idx, mid)
                                 if key in self._bwd_recv_posted:
