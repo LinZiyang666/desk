@@ -359,21 +359,21 @@ class AudioEncoderMidFive(nn.Module):
             hidden_states = self._maybe_ckpt(layer, hidden_states, cu_seqlens)
         return hidden_states.contiguous(), cu_seqlens.contiguous(), aftercnn_lens.contiguous()
 
-# -------------------------- Optional smoke test --------------------------
-def _smoke_test_audio_stage(stage: AudioStage) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """
-    Minimal sanity test. Adjust T and mask as needed.
-    """
-    device = next(stage.audio_enc.parameters()).device
-    dtype = next(stage.audio_enc.parameters()).dtype
-    n_mels = stage.audio_enc.conv1.in_channels
-    B, T = 2, 320  # toy lengths
+# # -------------------------- Optional smoke test --------------------------
+# def _smoke_test_audio_stage(stage: AudioStage) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+#     """
+#     Minimal sanity test. Adjust T and mask as needed.
+#     """
+#     device = next(stage.audio_enc.parameters()).device
+#     dtype = next(stage.audio_enc.parameters()).dtype
+#     n_mels = stage.audio_enc.conv1.in_channels
+#     B, T = 2, 320  # toy lengths
 
-    x = torch.randn(B, n_mels, T, device=device, dtype=dtype)
-    mask = torch.ones(B, T, device=device, dtype=torch.bool)
+#     x = torch.randn(B, n_mels, T, device=device, dtype=dtype)
+#     mask = torch.ones(B, T, device=device, dtype=torch.bool)
 
-    batch = {"input_features": x, "feature_attention_mask": mask}
-    return stage.forward(batch, allow_fallback=False, debug=True)
+#     batch = {"input_features": x, "feature_attention_mask": mask}
+#     return stage.forward(batch, allow_fallback=False, debug=True)
 
 
 class VisionStage(nn.Module):
