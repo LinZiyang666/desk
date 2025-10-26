@@ -642,6 +642,11 @@ class PipelineScheduleRuntimeWithDirection(schedule.PipelineScheduleMulti):
                     # …保留/按需实现…
                     pass
 
+                if kind == "RECV_B":
+                    tags = [getattr(op, "tag", None) for op in sub_ops]
+                    print(
+                        f"[rank{dist.get_rank()}] RECV_B chunk {chunk_idx} stage {stage_idx} mb {mb_index} tags={tags}"
+                    )
                 start_ns_k = time.time_ns()
                 works_k = schedule._batch_p2p(sub_ops)
 
@@ -702,6 +707,11 @@ class PipelineScheduleRuntimeWithDirection(schedule.PipelineScheduleMulti):
                                 f"(dep_rank={dep_rank}, dep_action_id={dep_action_id}, dep_chunk={dep_chunk}, mod={modality})")
                             raise
 
+                if kind == "SEND_B":
+                    tags = [getattr(op, "tag", None) for op in sub_ops]
+                    print(
+                        f"[rank{dist.get_rank()}] SEND_B chunk {chunk_idx} stage {stage_idx} mb {mb_index} tags={tags}"
+                    )
                 works_k = schedule._batch_p2p(sub_ops)
 
                 with self._async_send_lock:
