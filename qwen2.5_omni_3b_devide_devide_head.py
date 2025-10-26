@@ -1020,25 +1020,25 @@ def create_pipeline_actions():
     ]
     
     rank3_actions = [
-        _Action(1, 3, 0, _ComputationType.RECV_F, (0,), 0, None, None, None, None, ["audio"]),
+        _Action(1, 3, 0, _ComputationType.RECV_F, (0,), 6, None, None, None, None, ["audio"]),
         _Action(1, 3, 1, _ComputationType.RECV_F, (0,), 1, None, None, None, None, ["vision"]),
         _Action(1, 3, 2, _ComputationType.RECV_F, (0,), 2, None, None, None, None, ["text"]),
         _Action(1, 3, 3, _ComputationType.FORWARD, (0), None, None, None, None, None, ["audio","vision","text"]),
         _Action(1, 3, 4, _ComputationType.SEND_F, (0,), 4, None, None, None, None, None),
 
-        _Action(1, 3, 5, _ComputationType.RECV_F, (1,), 0, None, None, None, None, ["audio"]),
+        _Action(1, 3, 5, _ComputationType.RECV_F, (1,), 6, None, None, None, None, ["audio"]),
         _Action(1, 3, 6, _ComputationType.RECV_F, (1,), 1, None, None, None, None, ["vision"]),
         _Action(1, 3, 7, _ComputationType.RECV_F, (1,), 2, None, None, None, None, ["text"]),
         _Action(1, 3, 8, _ComputationType.FORWARD, (1), None, None, None, None, None, ["audio","vision","text"]),
         _Action(1, 3, 9, _ComputationType.SEND_F, (1,), 4, None, None, None, None, None),
 
-        _Action(1, 3, 10, _ComputationType.RECV_F, (2,), 0, None, None, None, None, ["audio"]),
+        _Action(1, 3, 10, _ComputationType.RECV_F, (2,), 6, None, None, None, None, ["audio"]),
         _Action(1, 3, 11, _ComputationType.RECV_F, (2,), 1, None, None, None, None, ["vision"]),
         _Action(1, 3, 12, _ComputationType.RECV_F, (2,), 2, None, None, None, None, ["text"]),
         _Action(1, 3, 13, _ComputationType.FORWARD, (2), None, None, None, None, None, ["audio","vision","text"]),
         _Action(1, 3, 14, _ComputationType.SEND_F, (2,), 4, None, None, None, None, None),
 
-        _Action(1, 3, 15, _ComputationType.RECV_F, (3,), 0, None, None, None, None, ["audio"]),
+        _Action(1, 3, 15, _ComputationType.RECV_F, (3,), 6, None, None, None, None, ["audio"]),
         _Action(1, 3, 16, _ComputationType.RECV_F, (3,), 1, None, None, None, None, ["vision"]),
         _Action(1, 3, 17, _ComputationType.RECV_F, (3,), 2, None, None, None, None, ["text"]),
         _Action(1, 3, 18, _ComputationType.FORWARD, (3), None, None, None, None, None, ["audio","vision","text"]),
@@ -1049,25 +1049,25 @@ def create_pipeline_actions():
         
         _Action(1, 3, 20, _ComputationType.RECV_B, (0,), 4, None, None, None, None, None),
         _Action(1, 3, 21, _ComputationType.FULL_BACKWARD, (0), None, None, None, None, None, ["audio","vision","text"]),
-        _Action(1, 3, 22, _ComputationType.SEND_B, (0,), 0, None, None, None, None, ["audio"]),
+        _Action(1, 3, 22, _ComputationType.SEND_B, (0,), 6, None, None, None, None, ["audio"]),
         _Action(1, 3, 23, _ComputationType.SEND_B, (0,), 1, None, None, None, None, ["vision"]),
         _Action(1, 3, 24, _ComputationType.SEND_B, (0,), 2, None, None, None, None, ["text"]),
         
         _Action(1, 3, 25, _ComputationType.RECV_B, (1,), 4, None, None, None, None, None),
         _Action(1, 3, 26, _ComputationType.FULL_BACKWARD, (1), None, None, None, None, None, ["audio","vision","text"]),
-        _Action(1, 3, 27, _ComputationType.SEND_B, (1,), 0, None, None, None, None, ["audio"]),
+        _Action(1, 3, 27, _ComputationType.SEND_B, (1,), 6, None, None, None, None, ["audio"]),
         _Action(1, 3, 28, _ComputationType.SEND_B, (1,), 1, None, None, None, None, ["vision"]),
         _Action(1, 3, 29, _ComputationType.SEND_B, (1,), 2, None, None, None, None, ["text"]),
         
         _Action(1, 3, 30, _ComputationType.RECV_B, (2,), 4, None, None, None, None, None),
         _Action(1, 3, 31, _ComputationType.FULL_BACKWARD, (2), None, None, None, None, None, ["audio","vision","text"]),
-        _Action(1, 3, 32, _ComputationType.SEND_B, (2,), 0, None, None, None, None, ["audio"]),
+        _Action(1, 3, 32, _ComputationType.SEND_B, (2,), 6, None, None, None, None, ["audio"]),
         _Action(1, 3, 33, _ComputationType.SEND_B, (2,), 1, None, None, None, None, ["vision"]),
         _Action(1, 3, 34, _ComputationType.SEND_B, (2,), 2, None, None, None, None, ["text"]),
         
         _Action(1, 3, 35, _ComputationType.RECV_B, (3,), 4, None, None, None, None, None),
         _Action(1, 3, 36, _ComputationType.FULL_BACKWARD, (3), None, None, None, None, None, ["audio","vision","text"]),
-        _Action(1, 3, 37, _ComputationType.SEND_B, (3,), 0, None, None, None, None, ["audio"]),
+        _Action(1, 3, 37, _ComputationType.SEND_B, (3,), 6, None, None, None, None, ["audio"]),
         _Action(1, 3, 38, _ComputationType.SEND_B, (3,), 1, None, None, None, None, ["vision"]),
         _Action(1, 3, 39, _ComputationType.SEND_B, (3,), 2, None, None, None, None, ["text"]),
     ]
