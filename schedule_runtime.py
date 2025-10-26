@@ -631,42 +631,19 @@ class PipelineScheduleRuntimeWithDirection(schedule.PipelineScheduleMulti):
         key = (stage_idx, mb_index) if modality is None else (stage_idx, mb_index, modality)
 
         def worker():
-            print(
-                f"[rank{dist.get_rank()}] {kind} worker start batch {current_batch+1} "
-                f"stage {stage_idx} mb {mb_index} modality={modality} plan={list(plan)} key={key} "
-                f"src={action.rank} dst={action.dest_rank}"
-            )
             pos = 0
             for chunk_idx, cnt in enumerate(plan):
                 if cnt <= 0:
                     continue
                 sub_ops = ops[pos:pos+cnt]; pos += cnt
 
-                op_details = [f"{op} tag={getattr(op, 'tag', None)}" for op in sub_ops]
-                print(
-                    f"[rank{dist.get_rank()}] {kind} preparing chunk {chunk_idx} cnt={cnt} "
-                    f"ops={len(sub_ops)} stage {stage_idx} mb {mb_index} modality={modality} key={key} "
-                    f"ops_detail={op_details}"
-                )
-
                 # 这里预留依赖等待（如需按模态区分，外层已传入 chunk_deps）
                 if chunk_deps and chunk_idx in chunk_deps:
                     # …保留/按需实现…
-                    print(
-                        f"[rank{dist.get_rank()}] {kind} chunk {chunk_idx} waiting deps "
-                        f"{chunk_deps[chunk_idx]} stage {stage_idx} mb {mb_index}"
-                    )
                     pass
 
                 start_ns_k = time.time_ns()
                 works_k = schedule._batch_p2p(sub_ops)
-
-                work_details = [str(w) for w in works_k]
-                print(
-                    f"[rank{dist.get_rank()}] {kind} posted chunk {chunk_idx} stage {stage_idx} "
-                    f"mb {mb_index} modality={modality} works={len(works_k)} key={key} "
-                    f"details={work_details}"
-                )
 
                 # 仅记录，保持向后兼容；如你扩展了 recorder，可也传 modality
                 self._rec.record_async(
@@ -676,30 +653,14 @@ class PipelineScheduleRuntimeWithDirection(schedule.PipelineScheduleMulti):
 
                 with self._async_recv_lock:
                     if kind == "RECV_F":
-                        existing = len(self._fwd_recv_works.setdefault(key, []))
-                        self._fwd_recv_works[key].extend(works_k)
-                        print(
-                            f"[rank{dist.get_rank()}] {kind} stored chunk {chunk_idx} works={len(works_k)} "
-                            f"stage {stage_idx} mb {mb_index} modality={modality} key={key} "
-                            f"total={len(self._fwd_recv_works[key])} prev={existing}"
-                        )
+                        self._fwd_recv_works.setdefault(key, []).extend(works_k)
                     else:
-                        existing = len(self._bwd_recv_works.setdefault(key, []))
-                        self._bwd_recv_works[key].extend(works_k)
-                        print(
-                            f"[rank{dist.get_rank()}] {kind} stored chunk {chunk_idx} works={len(works_k)} "
-                            f"stage {stage_idx} mb {mb_index} modality={modality} key={key} "
-                            f"total={len(self._bwd_recv_works[key])} prev={existing}"
-                        )
+                        self._bwd_recv_works.setdefault(key, []).extend(works_k)
 
             # 全部分块 ops 已 post 的事件
             with self._async_recv_lock:
                 ev = self._fwd_recv_posted.get(key) if kind == "RECV_F" else self._bwd_recv_posted.get(key)
             if ev is not None:
-                print(
-                    f"[rank{dist.get_rank()}] {kind} worker finished stage {stage_idx} mb {mb_index} "
-                    f"modality={modality} key={key}; signaling waiters"
-                )
                 ev.set()
 
         t = threading.Thread(
@@ -724,23 +685,11 @@ class PipelineScheduleRuntimeWithDirection(schedule.PipelineScheduleMulti):
         assert kind in ("SEND_F", "SEND_B")
 
         def worker():
-            print(
-                f"[rank{dist.get_rank()}] {kind} worker start batch {current_batch+1} "
-                f"stage {stage_idx} mb {mb_index} modality={modality} plan={list(plan)} "
-                f"src={action.rank} dst={action.dest_rank}"
-            )
             pos = 0
             for chunk_idx, cnt in enumerate(plan):
                 if cnt <= 0:
                     continue
                 sub_ops = ops[pos:pos+cnt]; pos += cnt
-
-                op_details = [f"{op} tag={getattr(op, 'tag', None)}" for op in sub_ops]
-                print(
-                    f"[rank{dist.get_rank()}] {kind} preparing chunk {chunk_idx} cnt={cnt} "
-                    f"ops={len(sub_ops)} stage {stage_idx} mb {mb_index} modality={modality} "
-                    f"ops_detail={op_details}"
-                )
 
                 # 只允许 SEND 依赖 RECV 的 chunk 完成
                 if chunk_deps and chunk_idx in chunk_deps:
@@ -752,34 +701,16 @@ class PipelineScheduleRuntimeWithDirection(schedule.PipelineScheduleMulti):
                             print(f"[{dist.get_rank()}] TIMEOUT waiting "
                                 f"(dep_rank={dep_rank}, dep_action_id={dep_action_id}, dep_chunk={dep_chunk}, mod={modality})")
                             raise
-                        print(f"[{dist.get_rank()}] SEND {kind} st{stage_idx} mb{mb_index} "
-                            f"chunk{chunk_idx} dep OK (mod={modality})")
 
                 works_k = schedule._batch_p2p(sub_ops)
 
-                work_details = [str(w) for w in works_k]
-                print(
-                    f"[rank{dist.get_rank()}] {kind} posted chunk {chunk_idx} stage {stage_idx} "
-                    f"mb {mb_index} modality={modality} works={len(works_k)} details={work_details}"
-                )
-
                 with self._async_send_lock:
                     self._async_send_works[current_batch+1].append(works_k)
-
-                print(
-                    f"[rank{dist.get_rank()}] {kind} stored chunk {chunk_idx} batch {current_batch+1} "
-                    f"stage {stage_idx} mb {mb_index} modality={modality}"
-                )
 
                 start_ns_k = time.time_ns()
                 # 记录器保持向后兼容；如果你扩展了 recorder，可把 modality 加为额外字段
                 self._rec.record_async(current_batch+1, action.id, kind, stage_idx, mb_index,
                                     works_k, start_ns_k, chunk_idx=chunk_idx)
-
-            print(
-                f"[rank{dist.get_rank()}] {kind} worker exit batch {current_batch+1} "
-                f"stage {stage_idx} mb {mb_index} modality={modality}"
-            )
 
         t = threading.Thread(
             target=worker,
@@ -1410,38 +1341,11 @@ class PipelineScheduleRuntimeWithDirection(schedule.PipelineScheduleMulti):
                                         key_m = (stage_idx, mid, m)
                                         assert key_m in self._fwd_recv_posted, \
                                             f"Computing {action=} before RECV_F posted (modality={m}). Available keys: {list(self._fwd_recv_posted.keys())}"
-                                        event = self._fwd_recv_posted[key_m]
-                                        print(
-                                            f"[rank{dist.get_rank()}] WAIT RECV_F event key={key_m} "
-                                            f"is_set={event.is_set()} cached={len(self._fwd_recv_works.get(key_m, []))}"
-                                        )
-                                        event.wait()
+                                        self._fwd_recv_posted[key_m].wait()
                                         with self._async_recv_lock:
                                             works = self._fwd_recv_works.pop(key_m, [])
-                                            print(
-                                                f"[rank{dist.get_rank()}] WAIT RECV_F got works key={key_m} "
-                                                f"count={len(works)}"
-                                            )
-                                        wait_start = time.time()
-                                        last_log = wait_start
-                                        while True:
-                                            completed_flags = [w.is_completed() for w in works]
-                                            if all(completed_flags):
-                                                break
-                                            now = time.time()
-                                            if now - last_log >= 0.5:
-                                                print(
-                                                    f"[rank{dist.get_rank()}] WAIT RECV_F pending key={key_m} "
-                                                    f"elapsed={now - wait_start:.2f}s completed={completed_flags}"
-                                                )
-                                                last_log = now
+                                        while not all(w.is_completed() for w in works):
                                             time.sleep(0.001)
-                                        total_wait = time.time() - wait_start
-                                        if total_wait >= 0.1:
-                                            print(
-                                                f"[rank{dist.get_rank()}] WAIT RECV_F done key={key_m} "
-                                                f"waited={total_wait:.2f}s"
-                                            )
                                         self._fwd_recv_posted.pop(key_m, None)
 
                                         if hasattr(stage, "finish_fwd_recv_mm"):
@@ -1451,39 +1355,12 @@ class PipelineScheduleRuntimeWithDirection(schedule.PipelineScheduleMulti):
                                 for mid in mb_ids:
                                     key = (stage_idx, mid)
                                     assert key in self._fwd_recv_posted, f"Computing {action=} before RECV_F posted"
-                                    event = self._fwd_recv_posted[key]
-                                    print(
-                                        f"[rank{dist.get_rank()}] WAIT RECV_F event key={key} "
-                                        f"is_set={event.is_set()} cached={len(self._fwd_recv_works.get(key, []))}"
-                                    )
-                                    event.wait()
+                                    self._fwd_recv_posted[key].wait()
                                     with self._async_recv_lock:
                                         works_count = len(self._fwd_recv_works.get(key, []))
                                         works = self._fwd_recv_works.pop(key, [])
-                                        print(
-                                            f"[rank{dist.get_rank()}] WAIT RECV_F got works key={key} count={len(works)} "
-                                            f"cached_before={works_count}"
-                                        )
-                                    wait_start = time.time()
-                                    last_log = wait_start
-                                    while True:
-                                        completed_flags = [w.is_completed() for w in works]
-                                        if all(completed_flags):
-                                            break
-                                        now = time.time()
-                                        if now - last_log >= 0.5:
-                                            print(
-                                                f"[rank{dist.get_rank()}] WAIT RECV_F pending key={key} "
-                                                f"elapsed={now - wait_start:.2f}s completed={completed_flags}"
-                                            )
-                                            last_log = now
+                                    while not all(w.is_completed() for w in works):
                                         time.sleep(0.001)
-                                    total_wait = time.time() - wait_start
-                                    if total_wait >= 0.1:
-                                        print(
-                                            f"[rank{dist.get_rank()}] WAIT RECV_F done key={key} "
-                                            f"waited={total_wait:.2f}s"
-                                        )
                                     self._fwd_recv_posted.pop(key, None)
 
                         # 取本段前向输入

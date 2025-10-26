@@ -1448,12 +1448,6 @@ class PipelineStage_Multimodality(PipelineStage_with_mutiple_ranks):
                 ops_per_chunk[split_idx] += 1
 
         self._last_comm_plan[("RECV_F", fwd_chunk_id, modality)] = ops_per_chunk
-        try:
-            print(
-                f"[rank{dist.get_rank()}] get_fwd_recv_ops_mm: mb={fwd_chunk_id} mod={modality} plans={len(plans)} ops_per_chunk={ops_per_chunk}"
-            )
-        except Exception:
-            pass
         return ops
 
 
@@ -1465,10 +1459,6 @@ class PipelineStage_Multimodality(PipelineStage_with_mutiple_ranks):
         self._ensure_mm_tables()
         post_list = self._mm_fwd_post_recv.pop((fwd_chunk_id, modality), None)
         if not post_list:
-            try:
-                print(f"[rank{dist.get_rank()}] finish_fwd_recv_mm: mb={fwd_chunk_id} modality={modality} has no post_list; mm_fwd_cache keys now: {list(self.mm_fwd_cache.get(fwd_chunk_id, {}).keys())}")
-            except Exception:
-                pass
             return
         tensors = []
         for tmp_full_flat, shape, dtype, device in post_list:
@@ -1479,17 +1469,7 @@ class PipelineStage_Multimodality(PipelineStage_with_mutiple_ranks):
             tensors.append(tensor)
         self.mm_fwd_cache[fwd_chunk_id][modality] = tuple(tensors)
 
-        # Debug: summarize what we stored for this modality
-        try:
-            shapes = [tuple(t.shape) if isinstance(t, torch.Tensor) else type(t).__name__ for t in tensors]
-            dtypes = [str(t.dtype) if isinstance(t, torch.Tensor) else "N/A" for t in tensors]
-            reqgs  = [bool(getattr(t, 'requires_grad', False)) if isinstance(t, torch.Tensor) else False for t in tensors]
-            print(
-                f"[rank{dist.get_rank()}] finish_fwd_recv_mm: mb={fwd_chunk_id} modality={modality} stored {len(tensors)} tensors; "
-                f"shapes={shapes}, dtypes={dtypes}, requires_grad={reqgs}"
-            )
-        except Exception:
-            pass
+        # Debug logging removed
 
 
     # =============== Backward: SEND（packing → heads）================
