@@ -642,7 +642,7 @@ class PipelineScheduleRuntimeWithDirection(schedule.PipelineScheduleMulti):
                     continue
                 sub_ops = ops[pos:pos+cnt]; pos += cnt
 
-                op_details = [str(op) for op in sub_ops]
+                op_details = [f"{op} tag={getattr(op, 'tag', None)}" for op in sub_ops]
                 print(
                     f"[rank{dist.get_rank()}] {kind} preparing chunk {chunk_idx} cnt={cnt} "
                     f"ops={len(sub_ops)} stage {stage_idx} mb {mb_index} modality={modality} key={key} "
@@ -735,7 +735,7 @@ class PipelineScheduleRuntimeWithDirection(schedule.PipelineScheduleMulti):
                     continue
                 sub_ops = ops[pos:pos+cnt]; pos += cnt
 
-                op_details = [str(op) for op in sub_ops]
+                op_details = [f"{op} tag={getattr(op, 'tag', None)}" for op in sub_ops]
                 print(
                     f"[rank{dist.get_rank()}] {kind} preparing chunk {chunk_idx} cnt={cnt} "
                     f"ops={len(sub_ops)} stage {stage_idx} mb {mb_index} modality={modality} "
@@ -1027,7 +1027,7 @@ class PipelineScheduleRuntimeWithDirection(schedule.PipelineScheduleMulti):
                 stage_idx = action.stage_index
                 stage = stage_index_to_stage[stage_idx]
                 stage_uses_fsdp = isinstance(stage.submod, schedule.FSDPModule)
-                
+
                 is_next_stage_on_this_rank = stage_idx + 1 in stage_index_to_stage
                 is_prev_stage_on_this_rank = stage_idx - 1 in stage_index_to_stage
                 
@@ -1067,7 +1067,7 @@ class PipelineScheduleRuntimeWithDirection(schedule.PipelineScheduleMulti):
                             else stage.get_fwd_send_ops(
                                 mb_index,
                                 rank=None,
-                                dest_rank=None,
+                                dest_rank=dest_rank,
                                 num_splits=num_splits,
                                 modality=m,
                             )
@@ -1093,7 +1093,7 @@ class PipelineScheduleRuntimeWithDirection(schedule.PipelineScheduleMulti):
                                 )
                             else:
                                 ops = stage.get_fwd_send_ops_mm(
-                                    mb_index, rank=None, dest_rank=None,
+                                    mb_index, rank=None, dest_rank=dest_rank,
                                     modality=m, num_splits=num_splits
                                 )
                             plan = stage._last_comm_plan.get(("SEND_F", mb_index, m), [len(ops)])
@@ -1111,7 +1111,7 @@ class PipelineScheduleRuntimeWithDirection(schedule.PipelineScheduleMulti):
                                 else stage.get_fwd_send_ops(
                                     mb_index,
                                     rank=None,
-                                    dest_rank=None,
+                                    dest_rank=dest_rank,
                                     num_splits=num_splits,
                                     modality=m,
                                 )
@@ -1218,7 +1218,7 @@ class PipelineScheduleRuntimeWithDirection(schedule.PipelineScheduleMulti):
                             )
                         else:
                             ops = stage.get_fwd_recv_ops_mm(
-                                mb_index, rank=None, dest_rank=None, modality=m, num_splits=num_splits
+                                mb_index, rank=None, dest_rank=dest_rank, modality=m, num_splits=num_splits
                             )
                         plan = stage._last_comm_plan.get(("RECV_F", mb_index, m), [len(ops)])
 
@@ -1258,7 +1258,7 @@ class PipelineScheduleRuntimeWithDirection(schedule.PipelineScheduleMulti):
                             ops = stage.get_fwd_recv_ops(
                                 mb_index,
                                 rank=None,
-                                dest_rank=None,
+                                dest_rank=dest_rank,
                                 num_splits=num_splits,
                                 modality=m,
                             )

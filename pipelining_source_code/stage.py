@@ -27,6 +27,43 @@ __all__ = [
 
 logger = logging.getLogger(__name__)
 
+# ===== Communication tag helpers (shared with stage_with_mutiple_ranks) =====
+MOD2ID = {"text": 0, "audio": 1, "vision": 2, "packing": 3}
+_DIR_SHIFT, _MB_SHIFT, _SLOT_SHIFT, _SPLIT_SHIFT = 27, 17, 8, 0
+_MB_BITS, _SLOT_BITS, _SPLIT_BITS = 10, 9, 8
+_MB_MASK, _SLOT_MASK, _SPLIT_MASK = (1 << _MB_BITS) - 1, (1 << _SLOT_BITS) - 1, (1 << _SPLIT_BITS) - 1
+_MOD_SHIFT, _MOD_BITS = 28, 2
+_MOD_MASK = (1 << _MOD_BITS) - 1
+
+
+def _mk_tag(direction: int, microbatch_id: int, slot_idx: int, split_idx: int, modality: int = 0) -> int:
+    """Generate 31-bit tag compatible with multimodal stages."""
+    need_fallback = (
+        microbatch_id > _MB_MASK
+        or slot_idx > _SLOT_MASK
+        or split_idx > _SPLIT_MASK
+        or modality > _MOD_MASK
+    )
+    if not need_fallback:
+        return (
+            ((modality & _MOD_MASK) << _MOD_SHIFT)
+            | ((direction & 1) << _DIR_SHIFT)
+            | ((microbatch_id & _MB_MASK) << _MB_SHIFT)
+            | ((slot_idx & _SLOT_MASK) << _SLOT_SHIFT)
+            | ((split_idx & _SPLIT_MASK) << _SPLIT_SHIFT)
+        )
+
+    v = (direction & 1) << 61
+    v ^= (int(modality) & 0x3) << 59
+    v ^= (int(microbatch_id) & 0xFFFFFFFF) << 30
+    v ^= (int(slot_idx) & 0x3FFFFFFF) << 10
+    v ^= (int(split_idx) & 0x3FF)
+    v ^= (v >> 33)
+    v *= 0xFF51AFD7ED558CCD
+    v &= (1 << 64) - 1
+    v ^= (v >> 33)
+    return int(v & 0x7FFFFFFF)
+
 
 def _normalize_model_output_as_tuple(output: Any) -> tuple[Any]:
     """[Note: pipeline model output type]
@@ -311,25 +348,42 @@ class _PipelineStageBase(ABC):
     def _get_recv_ops(
         self,
         recv_infos: tuple[InputInfo, ...],
+        *,
+        microbatch_id: int,
+        direction: int,
+        modality: Optional[str] = None,
     ) -> list[dist.P2POp]:
         """
-        Helper function shared by `get_fwd_recv_ops` and `get_bwd_recv_ops`.
-        Returns a list of ops that correspond to the recv infos.
+        Helper shared by `get_fwd_recv_ops` and `get_bwd_recv_ops` that attaches
+        consistent tags (including modality) to each receive op.
         """
         ops: list[dist.P2POp] = []
+        mod_id = MOD2ID.get(modality, 0) if modality else 0
+        slot_idx = 0
         for info in recv_infos:
             if not isinstance(info, _RecvInfo):
                 continue
 
             peer_rank = self.stage_index_to_group_rank[info.source]
+            if modality is not None and direction == 0:
+                print(
+                    f"[stage {self.stage_index}] recv slot{slot_idx} src_stage={info.source} "
+                    f"mapped_rank={peer_rank} modality={modality}"
+                )
             peer_global_rank = (
                 peer_rank
                 if self.group is None
                 else dist.get_global_rank(self.group, peer_rank)
             )
+            tag = _mk_tag(direction, microbatch_id, slot_idx, 0, mod_id)
             ops.append(
-                dist.P2POp(dist.irecv, info.buffer, peer_global_rank, self.group)
+                dist.P2POp(dist.irecv, info.buffer, peer_global_rank, self.group, tag=tag)
             )
+            slot_idx += 1
+
+        plan_kind = "RECV_F" if direction == 0 else "RECV_B"
+        plan_key = (plan_kind, microbatch_id, modality) if modality else (plan_kind, microbatch_id)
+        self._last_comm_plan[plan_key] = [len(ops)]
 
         return ops
 
@@ -425,16 +479,35 @@ class _PipelineStageBase(ABC):
             )
             info.buffer = tensor
 
-    def get_fwd_recv_ops(self, fwd_chunk_id: int) -> list[dist.P2POp]:
+    def get_fwd_recv_ops(
+        self,
+        fwd_chunk_id: int,
+        rank: Optional[int] = None,
+        dest_rank: Optional[int] = None,
+        num_splits: int = 1,
+        modality: Optional[str] = None,
+    ) -> list[dist.P2POp]:
         """
         Returns a list of ops that are needed to receive the input arguments
         for this stage.
         """
         recv_infos: tuple[InputInfo, ...] = self.args_recv_info[fwd_chunk_id]
 
-        return self._get_recv_ops(recv_infos)
+        return self._get_recv_ops(
+            recv_infos,
+            microbatch_id=fwd_chunk_id,
+            direction=0,
+            modality=modality,
+        )
 
-    def get_bwd_recv_ops(self, bwd_chunk_id: int) -> list[dist.P2POp]:
+    def get_bwd_recv_ops(
+        self,
+        bwd_chunk_id: int,
+        rank: Optional[int] = None,
+        dest_rank: Optional[int] = None,
+        num_splits: int = 1,
+        modality: Optional[str] = None,
+    ) -> list[dist.P2POp]:
         """
         Returns a list of ops that are needed to receive the gradients
         for this stage.
@@ -443,18 +516,37 @@ class _PipelineStageBase(ABC):
             return []
 
         recv_infos = self.grad_recv_info[bwd_chunk_id]
-        return self._get_recv_ops(recv_infos)
+        return self._get_recv_ops(
+            recv_infos,
+            microbatch_id=bwd_chunk_id,
+            direction=1,
+            modality=modality,
+        )
 
-    def get_fwd_send_ops(self, fwd_chunk_id: int) -> list[dist.P2POp]:
+    def get_fwd_send_ops(
+        self,
+        fwd_chunk_id: int,
+        rank: Optional[int] = None,
+        dest_rank: Optional[int] = None,
+        num_splits: int = 1,
+        modality: Optional[str] = None,
+    ) -> list[dist.P2POp]:
         """
         Get the activation send ops for current stage's forward.
         """
         output_tuple, _ = self.fwd_cache[fwd_chunk_id]
-
-        ops: list[dist.P2POp] = []
-
+        plans: list[tuple[int, torch.Tensor, Any]] = []
+        slot_ctr = 0
         for idx, out in enumerate(output_tuple):
             dst_stages = self.act_send_info[idx]
+            if dst_stages is None or not isinstance(out, torch.Tensor):
+                continue
+            plans.append((slot_ctr, out, dst_stages))
+            slot_ctr += 1
+
+        ops: list[dist.P2POp] = []
+        mod_id = MOD2ID.get(modality, 0) if modality else 0
+        for slot_idx, tensor, dst_stages in plans:
             for dst in dst_stages:
                 if dst is None:
                     continue
@@ -462,7 +554,7 @@ class _PipelineStageBase(ABC):
                     "%s Sending tensor to Stage %s: %s",
                     self.log_prefix,
                     dst,
-                    out.size(),
+                    tensor.size(),
                 )
                 peer_rank = self.stage_index_to_group_rank[dst]
                 peer_global_rank = (
@@ -470,11 +562,22 @@ class _PipelineStageBase(ABC):
                     if self.group is None
                     else dist.get_global_rank(self.group, peer_rank)
                 )
-                ops.append(dist.P2POp(dist.isend, out, peer_global_rank, self.group))
+                tag = _mk_tag(0, fwd_chunk_id, slot_idx, 0, mod_id)
+                ops.append(dist.P2POp(dist.isend, tensor, peer_global_rank, self.group, tag=tag))
+
+        plan_key = ("SEND_F", fwd_chunk_id, modality) if modality else ("SEND_F", fwd_chunk_id)
+        self._last_comm_plan[plan_key] = [len(ops)]
 
         return ops
 
-    def get_bwd_send_ops(self, bwd_chunk_id: int) -> list[dist.P2POp]:
+    def get_bwd_send_ops(
+        self,
+        bwd_chunk_id: int,
+        rank: Optional[int] = None,
+        dest_rank: Optional[int] = None,
+        num_splits: int = 1,
+        modality: Optional[str] = None,
+    ) -> list[dist.P2POp]:
         """
         Get the gradient send ops for current stage's backward.
         """
@@ -492,7 +595,9 @@ class _PipelineStageBase(ABC):
             self.grad_send_info = self._create_grad_send_info(self.args_recv_info[0])
 
         ops: list[dist.P2POp] = []
+        mod_id = MOD2ID.get(modality, 0) if modality else 0
         grads_input = self.bwd_cache.pop(bwd_chunk_id)
+        slot_idx = 0
         for grad, grad_recv_stage in zip(grads_input, self.grad_send_info):
             if isinstance(grad, torch.Tensor) and grad_recv_stage is not None:
                 logger.debug(
@@ -507,13 +612,17 @@ class _PipelineStageBase(ABC):
                     if self.group is None
                     else dist.get_global_rank(self.group, peer_rank)
                 )
-                ops.append(dist.P2POp(dist.isend, grad, peer_global_rank, self.group))
+                tag = _mk_tag(1, bwd_chunk_id, slot_idx, 0, mod_id)
+                ops.append(dist.P2POp(dist.isend, grad, peer_global_rank, self.group, tag=tag))
+                slot_idx += 1
             else:
                 if not (grad is None and grad_recv_stage is None):
                     raise RuntimeError(
                         f"[{self.stage_index}] for chunk {bwd_chunk_id} has gradients {grad} "
                         f"and is expecting to send gradients to stage {grad_recv_stage}"
                     )
+        plan_key = ("SEND_B", bwd_chunk_id, modality) if modality else ("SEND_B", bwd_chunk_id)
+        self._last_comm_plan[plan_key] = [len(ops)]
         return ops
 
     def clear_runtime_states(self) -> None:
@@ -1288,6 +1397,7 @@ class PipelineStage(_PipelineStageBase):
         super().__init__(submodule, stage_index, num_stages, device, group, dw_builder)
         self.inputs: Optional[list[torch.Tensor]] = None
         self.inputs_meta: Optional[tuple[torch.Tensor, ...]] = None
+        self._last_comm_plan: dict[tuple, list[int]] = {}
         # Note: inputs and submod should ideally be on meta device. We decided not to assert this (yet) becuase it
         # might be breaking for existing users.
         if input_args is None:
