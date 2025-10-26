@@ -225,7 +225,14 @@ class PipelineStage_with_mutiple_ranks(PipelineStage):
             start += length
         return slices
 
-    def get_fwd_send_ops(self, fwd_chunk_id: int, rank: int, dest_rank: int, num_splits: int = 1) -> list[dist.P2POp]:
+    def get_fwd_send_ops(
+        self,
+        fwd_chunk_id: int,
+        rank: int,
+        dest_rank: int,
+        num_splits: int = 1,
+        modality: Optional[str] = None,
+    ) -> list[dist.P2POp]:
         """
         Forward activations: 1D-flat chunking.
         生成顺序：外层 split_idx，内层轮询所有张量；同时统计每个分块的 P2POp 数量。
@@ -252,6 +259,8 @@ class PipelineStage_with_mutiple_ranks(PipelineStage):
             plans.append((slot_ctr, flat, slices, dst_stages))  # ===== TAG-ADD =====
             slot_ctr += 1                                       # ===== TAG-ADD =====
 
+        mod_id = MOD2ID.get(modality, 0) if modality else 0
+
         for split_idx in range(max(1, num_splits)):
             for slot_idx, flat, slices, dst_stages in plans:    # ===== TAG-ADD (只改解包变量名) =====
                 if split_idx >= len(slices):
@@ -262,16 +271,24 @@ class PipelineStage_with_mutiple_ranks(PipelineStage):
                     if _dst is None:
                         continue
                     # 只新增 tag，不改变你的发送逻辑
-                    tag = _mk_tag(0, fwd_chunk_id, slot_idx, split_idx)  # ===== TAG-ADD =====
+                    tag = _mk_tag(0, fwd_chunk_id, slot_idx, split_idx, mod_id)  # ===== TAG-ADD =====
                     ops.append(dist.P2POp(dist.isend, chunk_view, peer_global_rank, self.group, tag=tag))  # ===== TAG-ADD =====
                     ops_per_chunk[split_idx] += 1
 
 
         # 记录“每分块 op 数”
-        self._last_comm_plan[("SEND_F", fwd_chunk_id)] = ops_per_chunk
+        plan_key = ("SEND_F", fwd_chunk_id, modality) if modality else ("SEND_F", fwd_chunk_id)
+        self._last_comm_plan[plan_key] = ops_per_chunk
         return ops
             
-    def get_fwd_recv_ops(self, fwd_chunk_id: int, rank: int, dest_rank: int, num_splits: int = 1) -> list[dist.P2POp]:
+    def get_fwd_recv_ops(
+        self,
+        fwd_chunk_id: int,
+        rank: int,
+        dest_rank: int,
+        num_splits: int = 1,
+        modality: Optional[str] = None,
+    ) -> list[dist.P2POp]:
         """
         Forward activations: 1D-flat irecv into final buffers.
         生成顺序：外层 split_idx，内层轮询所有目标缓冲；同时统计每个分块的 P2POp 数量。
@@ -296,18 +313,21 @@ class PipelineStage_with_mutiple_ranks(PipelineStage):
             plans.append((slot_ctr, buf_flat, slices))  # ===== TAG-ADD =====
             slot_ctr += 1                               # ===== TAG-ADD =====
 
+        mod_id = MOD2ID.get(modality, 0) if modality else 0
+
         for split_idx in range(max(1, num_splits)):
             for slot_idx, buf_flat, slices in plans:    # ===== TAG-ADD (只改解包变量名) =====
                 if split_idx >= len(slices):
                     continue
                 off, ln = slices[split_idx]
                 view = buf_flat.narrow(0, off, ln)
-                tag = _mk_tag(0, fwd_chunk_id, slot_idx, split_idx)  # ===== TAG-ADD =====
+                tag = _mk_tag(0, fwd_chunk_id, slot_idx, split_idx, mod_id)  # ===== TAG-ADD =====
                 ops.append(dist.P2POp(dist.irecv, view, peer_global_rank, self.group, tag=tag))  # ===== TAG-ADD =====
                 ops_per_chunk[split_idx] += 1
 
 
-        self._last_comm_plan[("RECV_F", fwd_chunk_id)] = ops_per_chunk
+        plan_key = ("RECV_F", fwd_chunk_id, modality) if modality else ("RECV_F", fwd_chunk_id)
+        self._last_comm_plan[plan_key] = ops_per_chunk
         return ops
 
 

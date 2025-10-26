@@ -633,7 +633,8 @@ class PipelineScheduleRuntimeWithDirection(schedule.PipelineScheduleMulti):
         def worker():
             print(
                 f"[rank{dist.get_rank()}] {kind} worker start batch {current_batch+1} "
-                f"stage {stage_idx} mb {mb_index} modality={modality} plan={list(plan)} key={key}"
+                f"stage {stage_idx} mb {mb_index} modality={modality} plan={list(plan)} key={key} "
+                f"src={action.rank} dst={action.dest_rank}"
             )
             pos = 0
             for chunk_idx, cnt in enumerate(plan):
@@ -641,9 +642,11 @@ class PipelineScheduleRuntimeWithDirection(schedule.PipelineScheduleMulti):
                     continue
                 sub_ops = ops[pos:pos+cnt]; pos += cnt
 
+                op_details = [str(op) for op in sub_ops]
                 print(
                     f"[rank{dist.get_rank()}] {kind} preparing chunk {chunk_idx} cnt={cnt} "
-                    f"ops={len(sub_ops)} stage {stage_idx} mb {mb_index} modality={modality} key={key}"
+                    f"ops={len(sub_ops)} stage {stage_idx} mb {mb_index} modality={modality} key={key} "
+                    f"ops_detail={op_details}"
                 )
 
                 # 这里预留依赖等待（如需按模态区分，外层已传入 chunk_deps）
@@ -658,9 +661,11 @@ class PipelineScheduleRuntimeWithDirection(schedule.PipelineScheduleMulti):
                 start_ns_k = time.time_ns()
                 works_k = schedule._batch_p2p(sub_ops)
 
+                work_details = [str(w) for w in works_k]
                 print(
                     f"[rank{dist.get_rank()}] {kind} posted chunk {chunk_idx} stage {stage_idx} "
-                    f"mb {mb_index} modality={modality} works={len(works_k)} key={key}"
+                    f"mb {mb_index} modality={modality} works={len(works_k)} key={key} "
+                    f"details={work_details}"
                 )
 
                 # 仅记录，保持向后兼容；如你扩展了 recorder，可也传 modality
@@ -721,7 +726,8 @@ class PipelineScheduleRuntimeWithDirection(schedule.PipelineScheduleMulti):
         def worker():
             print(
                 f"[rank{dist.get_rank()}] {kind} worker start batch {current_batch+1} "
-                f"stage {stage_idx} mb {mb_index} modality={modality} plan={list(plan)}"
+                f"stage {stage_idx} mb {mb_index} modality={modality} plan={list(plan)} "
+                f"src={action.rank} dst={action.dest_rank}"
             )
             pos = 0
             for chunk_idx, cnt in enumerate(plan):
@@ -729,9 +735,11 @@ class PipelineScheduleRuntimeWithDirection(schedule.PipelineScheduleMulti):
                     continue
                 sub_ops = ops[pos:pos+cnt]; pos += cnt
 
+                op_details = [str(op) for op in sub_ops]
                 print(
                     f"[rank{dist.get_rank()}] {kind} preparing chunk {chunk_idx} cnt={cnt} "
-                    f"ops={len(sub_ops)} stage {stage_idx} mb {mb_index} modality={modality}"
+                    f"ops={len(sub_ops)} stage {stage_idx} mb {mb_index} modality={modality} "
+                    f"ops_detail={op_details}"
                 )
 
                 # 只允许 SEND 依赖 RECV 的 chunk 完成
@@ -749,9 +757,10 @@ class PipelineScheduleRuntimeWithDirection(schedule.PipelineScheduleMulti):
 
                 works_k = schedule._batch_p2p(sub_ops)
 
+                work_details = [str(w) for w in works_k]
                 print(
                     f"[rank{dist.get_rank()}] {kind} posted chunk {chunk_idx} stage {stage_idx} "
-                    f"mb {mb_index} modality={modality} works={len(works_k)}"
+                    f"mb {mb_index} modality={modality} works={len(works_k)} details={work_details}"
                 )
 
                 with self._async_send_lock:
@@ -1047,11 +1056,24 @@ class PipelineScheduleRuntimeWithDirection(schedule.PipelineScheduleMulti):
                     # 无模态或 packing 场景：走旧单通道逻辑
                     if m is None or modal_type == "packing":
                         ops = (
-                            stage.get_fwd_send_ops(mb_index, rank=rank, dest_rank=dest_rank, num_splits=num_splits)
+                            stage.get_fwd_send_ops(
+                                mb_index,
+                                rank=rank,
+                                dest_rank=dest_rank,
+                                num_splits=num_splits,
+                                modality=m,
+                            )
                             if rank is not None and dest_rank is not None
-                            else stage.get_fwd_send_ops(mb_index, rank=None, dest_rank=None, num_splits=num_splits)
+                            else stage.get_fwd_send_ops(
+                                mb_index,
+                                rank=None,
+                                dest_rank=None,
+                                num_splits=num_splits,
+                                modality=m,
+                            )
                         )
-                        plan = stage._last_comm_plan.get(("SEND_F", mb_index), [len(ops)])
+                        plan_key = ("SEND_F", mb_index, m) if m is not None else ("SEND_F", mb_index)
+                        plan = stage._last_comm_plan.get(plan_key, [len(ops)])
 
                         self._spawn_chunked_send_worker(
                             kind="SEND_F", action=action, ops=ops, plan=plan,
@@ -1078,11 +1100,24 @@ class PipelineScheduleRuntimeWithDirection(schedule.PipelineScheduleMulti):
                         else:
                             # 兜底：没有 mm-API 时退回旧 API（不推荐，仅为兼容）
                             ops = (
-                                stage.get_fwd_send_ops(mb_index, rank=rank, dest_rank=dest_rank, num_splits=num_splits)
+                                stage.get_fwd_send_ops(
+                                    mb_index,
+                                    rank=rank,
+                                    dest_rank=dest_rank,
+                                    num_splits=num_splits,
+                                    modality=m,
+                                )
                                 if rank is not None and dest_rank is not None
-                                else stage.get_fwd_send_ops(mb_index, rank=None, dest_rank=None, num_splits=num_splits)
+                                else stage.get_fwd_send_ops(
+                                    mb_index,
+                                    rank=None,
+                                    dest_rank=None,
+                                    num_splits=num_splits,
+                                    modality=m,
+                                )
                             )
-                            plan = stage._last_comm_plan.get(("SEND_F", mb_index), [len(ops)])
+                            plan_key = ("SEND_F", mb_index, m) if m is not None else ("SEND_F", mb_index)
+                            plan = stage._last_comm_plan.get(plan_key, [len(ops)])
 
                         # 依赖：若已扩展按模态维护依赖，则优先用该模态的依赖；否则回退旧结构
                         chunk_deps_for_m = {}
@@ -1212,10 +1247,23 @@ class PipelineScheduleRuntimeWithDirection(schedule.PipelineScheduleMulti):
                         )
 
                         if rank is not None and dest_rank is not None:
-                            ops = stage.get_fwd_recv_ops(mb_index, rank=rank, dest_rank=dest_rank, num_splits=num_splits)
+                            ops = stage.get_fwd_recv_ops(
+                                mb_index,
+                                rank=rank,
+                                dest_rank=dest_rank,
+                                num_splits=num_splits,
+                                modality=m,
+                            )
                         else:
-                            ops = stage.get_fwd_recv_ops(mb_index, rank=None, dest_rank=None, num_splits=num_splits)
-                        plan = stage._last_comm_plan.get(("RECV_F", mb_index), [len(ops)])
+                            ops = stage.get_fwd_recv_ops(
+                                mb_index,
+                                rank=None,
+                                dest_rank=None,
+                                num_splits=num_splits,
+                                modality=m,
+                            )
+                        plan_key = ("RECV_F", mb_index, m) if m is not None else ("RECV_F", mb_index)
+                        plan = stage._last_comm_plan.get(plan_key, [len(ops)])
 
                         with self._async_recv_lock:
                             self._fwd_recv_works[key] = []
