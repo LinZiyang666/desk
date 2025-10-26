@@ -314,7 +314,14 @@ class PipelineStage_with_mutiple_ranks(PipelineStage):
             with torch.no_grad():
                 view.copy_(tmp)
 
-    def get_bwd_send_ops(self, bwd_chunk_id: int, rank: int, dest_rank: int, num_splits: int = 1) -> list[dist.P2POp]:
+    def get_bwd_send_ops(
+        self,
+        bwd_chunk_id: int,
+        rank: int,
+        dest_rank: int,
+        num_splits: int = 1,
+        modality: Optional[str] = None,
+    ) -> list[dist.P2POp]:
         """
         Backward grads: 1D-flat chunking.
         生成顺序：外层 split_idx，内层轮询所有梯度张量；同时统计每个分块的 P2POp 数量。
@@ -355,22 +362,30 @@ class PipelineStage_with_mutiple_ranks(PipelineStage):
 
         ops: list[dist.P2POp] = []
         ops_per_chunk: list[int] = [0 for _ in range(max(1, num_splits))]
+        mod_id = MOD2ID.get(modality, 0) if modality else 0
         for split_idx in range(max(1, num_splits)):
             for slot_idx, flat, slices in plans:    # ===== TAG-ADD (只改解包变量名) =====
                 if split_idx >= len(slices):
                     continue
                 off, ln = slices[split_idx]
                 chunk_view = flat.narrow(0, off, ln)
-                tag = _mk_tag(1, bwd_chunk_id, slot_idx, split_idx)  # ===== TAG-ADD =====
+                tag = _mk_tag(1, bwd_chunk_id, slot_idx, split_idx, mod_id)  # ===== TAG-ADD =====
                 ops.append(dist.P2POp(dist.isend, chunk_view, peer_global_rank, self.group, tag=tag))  # ===== TAG-ADD =====
                 ops_per_chunk[split_idx] += 1
 
-
-        self._last_comm_plan[("SEND_B", bwd_chunk_id)] = ops_per_chunk
+        plan_key = ("SEND_B", bwd_chunk_id, modality) if modality else ("SEND_B", bwd_chunk_id)
+        self._last_comm_plan[plan_key] = ops_per_chunk
         return ops
 
 
-    def get_bwd_recv_ops(self, bwd_chunk_id: int, rank: int, dest_rank: int, num_splits: int = 1) -> list[dist.P2POp]:
+    def get_bwd_recv_ops(
+        self,
+        bwd_chunk_id: int,
+        rank: int,
+        dest_rank: int,
+        num_splits: int = 1,
+        modality: Optional[str] = None,
+    ) -> list[dist.P2POp]:
         """
         Backward grads: 1D-flat irecv into final buffers.
         生成顺序：外层 split_idx，内层轮询所有目标缓冲；同时统计每个分块的 P2POp 数量。
@@ -381,6 +396,7 @@ class PipelineStage_with_mutiple_ranks(PipelineStage):
         recv_infos = self.grad_recv_info[bwd_chunk_id]
         ops: list[dist.P2POp] = []
         ops_per_chunk: list[int] = [0 for _ in range(max(1, num_splits))]
+        mod_id = MOD2ID.get(modality, 0) if modality else 0
 
         peer_rank = dest_rank
         peer_global_rank = (peer_rank if self.group is None else dist.get_global_rank(self.group, peer_rank))
@@ -402,12 +418,12 @@ class PipelineStage_with_mutiple_ranks(PipelineStage):
                     continue
                 off, ln = slices[split_idx]
                 view = buf_flat.narrow(0, off, ln)
-                tag = _mk_tag(1, bwd_chunk_id, slot_idx, split_idx)  # ===== TAG-ADD =====
+                tag = _mk_tag(1, bwd_chunk_id, slot_idx, split_idx, mod_id)  # ===== TAG-ADD =====
                 ops.append(dist.P2POp(dist.irecv, view, peer_global_rank, self.group, tag=tag))  # ===== TAG-ADD =====
                 ops_per_chunk[split_idx] += 1
 
-
-        self._last_comm_plan[("RECV_B", bwd_chunk_id)] = ops_per_chunk
+        plan_key = ("RECV_B", bwd_chunk_id, modality) if modality else ("RECV_B", bwd_chunk_id)
+        self._last_comm_plan[plan_key] = ops_per_chunk
         return ops
     
     def _execute_allreduce(self):

@@ -1282,10 +1282,23 @@ class PipelineScheduleRuntimeWithDirection(schedule.PipelineScheduleMulti):
                         )
 
                         if rank is not None and dest_rank is not None:
-                            ops = stage.get_bwd_recv_ops(mb_index, rank=rank, dest_rank=dest_rank, num_splits=num_splits)
+                            ops = stage.get_bwd_recv_ops(
+                                mb_index,
+                                rank=rank,
+                                dest_rank=dest_rank,
+                                num_splits=num_splits,
+                                modality=m,
+                            )
                         else:
-                            ops = stage.get_bwd_recv_ops(mb_index, rank=None, dest_rank=None, num_splits=num_splits)
-                        plan = stage._last_comm_plan.get(("RECV_B", mb_index), [len(ops)])
+                            ops = stage.get_bwd_recv_ops(
+                                mb_index,
+                                rank=None,
+                                dest_rank=None,
+                                num_splits=num_splits,
+                                modality=m,
+                            )
+                        plan_key = ("RECV_B", mb_index, m) if m is not None else ("RECV_B", mb_index)
+                        plan = stage._last_comm_plan.get(plan_key, [len(ops)])
 
                         with self._async_recv_lock:
                             self._bwd_recv_works[key] = []
@@ -1295,7 +1308,7 @@ class PipelineScheduleRuntimeWithDirection(schedule.PipelineScheduleMulti):
                             kind="RECV_B", action=action, ops=ops, plan=plan,
                             chunk_deps=(action.chunk_deps or {}),
                             current_batch=current_batch, stage_idx=stage_idx, mb_index=mb_index,
-                            action_id=action_id, modality=None
+                            action_id=action_id, modality=m
                         )
 
 
