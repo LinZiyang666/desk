@@ -642,7 +642,7 @@ class PipelineScheduleRuntimeWithDirection(schedule.PipelineScheduleMulti):
                     continue
                 sub_ops = ops[pos:pos+cnt]; pos += cnt
 
-                op_details = [str(op) for op in sub_ops]
+                op_details = [f"{op} tag={getattr(op, 'tag', None)}" for op in sub_ops]
                 print(
                     f"[rank{dist.get_rank()}] {kind} preparing chunk {chunk_idx} cnt={cnt} "
                     f"ops={len(sub_ops)} stage {stage_idx} mb {mb_index} modality={modality} key={key} "
@@ -735,7 +735,7 @@ class PipelineScheduleRuntimeWithDirection(schedule.PipelineScheduleMulti):
                     continue
                 sub_ops = ops[pos:pos+cnt]; pos += cnt
 
-                op_details = [str(op) for op in sub_ops]
+                op_details = [f"{op} tag={getattr(op, 'tag', None)}" for op in sub_ops]
                 print(
                     f"[rank{dist.get_rank()}] {kind} preparing chunk {chunk_idx} cnt={cnt} "
                     f"ops={len(sub_ops)} stage {stage_idx} mb {mb_index} modality={modality} "

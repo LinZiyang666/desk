@@ -17,48 +17,18 @@ from torch.fx.node import Argument, map_aggregate
 from torch.nn.parallel import DistributedDataParallel
 from torch.utils._pytree import tree_map_only
 
-from pipelining_source_code.stage import PipelineStage, InputInfo, _RecvInfo, _RootArgPlaceholder, _normalize_model_output_as_tuple
+from pipelining_source_code.stage import (
+    PipelineStage,
+    InputInfo,
+    _RecvInfo,
+    _RootArgPlaceholder,
+    _normalize_model_output_as_tuple,
+    MOD2ID,
+    _mk_tag,
+)
 from pipelining_source_code._utils import flatten_args
 from pipelining_source_code._backward import stage_backward, stage_backward_input, stage_backward_weight
 logger = logging.getLogger(__name__)
-
-# ===== TAG-ADD: tag 构造工具 =====
-_DIR_SHIFT, _MB_SHIFT, _SLOT_SHIFT, _SPLIT_SHIFT = 27, 17, 8, 0
-_MB_BITS,  _SLOT_BITS,  _SPLIT_BITS  = 10, 9, 8
-_MB_MASK,  _SLOT_MASK,  _SPLIT_MASK  = (1<<_MB_BITS)-1, (1<<_SLOT_BITS)-1, (1<<_SPLIT_BITS)-1
-
-MOD2ID = {"text":0, "audio":1, "vision":2, "packing":3}
-# New: 2-bit modality 放在更高位（28~29 位），还余 1 bit 备用（第 30 位）
-_MOD_SHIFT, _MOD_BITS = 28, 2
-_MOD_MASK = (1 << _MOD_BITS) - 1
-
-
-def _mk_tag(direction: int, microbatch_id: int, slot_idx: int, split_idx: int, modality: int = 0) -> int:
-    """31-bit tag；高 2bit 编码 modality（0..3）。若越界则回退到一致哈希（两端独立可复现）。"""
-    need_fallback = (
-        microbatch_id > _MB_MASK or
-        slot_idx      > _SLOT_MASK or
-        split_idx     > _SPLIT_MASK or
-        modality      > _MOD_MASK     # 新增：检查模态是否越界
-    )
-    if not need_fallback:
-        # 将 modality 放在最高位区间（28~29），保持你原有 4 段布局不变
-        return ((modality      & _MOD_MASK)  << _MOD_SHIFT) | \
-               ((direction     & 1)          << _DIR_SHIFT) | \
-               ((microbatch_id & _MB_MASK)   << _MB_SHIFT)  | \
-               ((slot_idx      & _SLOT_MASK) << _SLOT_SHIFT)| \
-               ((split_idx     & _SPLIT_MASK)<< _SPLIT_SHIFT)
-
-    # fallback: 简单一致哈希压 31 bit（把 modality 一并混入）
-    v = (direction & 1) << 61
-    v ^= (int(modality)     & 0x3)        << 59   # 新增：混入 2-bit 模态
-    v ^= (int(microbatch_id)& 0xFFFFFFFF) << 30
-    v ^= (int(slot_idx)     & 0x3FFFFFFF) << 10
-    v ^= (int(split_idx)    & 0x3FF)
-    v ^= (v >> 33); v *= 0xff51afd7ed558ccd; v &= (1<<64)-1; v ^= (v >> 33)
-    return int(v & 0x7fffffff)
-
-
 
 class PipelineStage_with_mutiple_ranks(PipelineStage):
     def __init__(
