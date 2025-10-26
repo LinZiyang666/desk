@@ -1276,7 +1276,7 @@ class PipelineScheduleRuntimeWithDirection(schedule.PipelineScheduleMulti):
 
                     else:
                         # —— 旧单通道路径（packing 或未提供模态） —— #
-                        key = (stage_idx, mb_index)
+                        key = (stage_idx, mb_index, m) if m is not None else (stage_idx, mb_index)
                         assert key not in self._bwd_recv_posted, (
                             f"Recv twice for stage_idx={stage_idx} mb_index={mb_index} without executing backward"
                         )
