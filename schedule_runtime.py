@@ -1548,7 +1548,7 @@ class PipelineScheduleRuntimeWithDirection(schedule.PipelineScheduleMulti):
                             print("到这里1")
                             for mid in mb_ids:
                                 key_m = (stage_idx, mid, m)
-                                print(f"{key}    {key_m in self._bwd_recv_posted}")
+                                print(f"{key_m}    {key_m in self._bwd_recv_posted}")
                                 if key_m in self._bwd_recv_posted:
                                     self._bwd_recv_posted[key_m].wait()
                                     with self._async_recv_lock:
