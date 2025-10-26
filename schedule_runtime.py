@@ -1121,17 +1121,30 @@ class PipelineScheduleRuntimeWithDirection(schedule.PipelineScheduleMulti):
                     else:
                         # 非 packing 或未提供模态：沿用旧的单通道发送
                         ops = (
-                            stage.get_bwd_send_ops(mb_index, rank=rank, dest_rank=dest_rank, num_splits=num_splits)
+                            stage.get_bwd_send_ops(
+                                mb_index,
+                                rank=rank,
+                                dest_rank=dest_rank,
+                                num_splits=num_splits,
+                                modality=m,
+                            )
                             if rank is not None and dest_rank is not None
-                            else stage.get_bwd_send_ops(mb_index, rank=None, dest_rank=None, num_splits=num_splits)
+                            else stage.get_bwd_send_ops(
+                                mb_index,
+                                rank=None,
+                                dest_rank=None,
+                                num_splits=num_splits,
+                                modality=m,
+                            )
                         )
-                        plan = stage._last_comm_plan.get(("SEND_B", mb_index), [len(ops)])
+                        plan_key = ("SEND_B", mb_index, m) if m is not None else ("SEND_B", mb_index)
+                        plan = stage._last_comm_plan.get(plan_key, [len(ops)])
 
                         self._spawn_chunked_send_worker(
                             kind="SEND_B", action=action, ops=ops, plan=plan,
                             chunk_deps=(action.chunk_deps or {}),
                             current_batch=current_batch, stage_idx=stage_idx, mb_index=mb_index,
-                            modality=None
+                            modality=m
                         )
 
 
