@@ -1374,11 +1374,25 @@ class PipelineScheduleRuntimeWithDirection(schedule.PipelineScheduleMulti):
                                                 f"[rank{dist.get_rank()}] WAIT RECV_F got works key={key_m} "
                                                 f"count={len(works)}"
                                             )
-                                        while not all(w.is_completed() for w in works):
+                                        wait_start = time.time()
+                                        last_log = wait_start
+                                        while True:
+                                            completed_flags = [w.is_completed() for w in works]
+                                            if all(completed_flags):
+                                                break
+                                            now = time.time()
+                                            if now - last_log >= 0.5:
+                                                print(
+                                                    f"[rank{dist.get_rank()}] WAIT RECV_F pending key={key_m} "
+                                                    f"elapsed={now - wait_start:.2f}s completed={completed_flags}"
+                                                )
+                                                last_log = now
                                             time.sleep(0.001)
+                                        total_wait = time.time() - wait_start
+                                        if total_wait >= 0.1:
                                             print(
-                                                f"[rank{dist.get_rank()}] WAIT RECV_F pending completion key={key_m} "
-                                                f"completed={[w.is_completed() for w in works]}"
+                                                f"[rank{dist.get_rank()}] WAIT RECV_F done key={key_m} "
+                                                f"waited={total_wait:.2f}s"
                                             )
                                         self._fwd_recv_posted.pop(key_m, None)
 
@@ -1402,13 +1416,26 @@ class PipelineScheduleRuntimeWithDirection(schedule.PipelineScheduleMulti):
                                             f"[rank{dist.get_rank()}] WAIT RECV_F got works key={key} count={len(works)} "
                                             f"cached_before={works_count}"
                                         )
-                                    while not all(w.is_completed() for w in works):
+                                    wait_start = time.time()
+                                    last_log = wait_start
+                                    while True:
+                                        completed_flags = [w.is_completed() for w in works]
+                                        if all(completed_flags):
+                                            break
+                                        now = time.time()
+                                        if now - last_log >= 0.5:
+                                            print(
+                                                f"[rank{dist.get_rank()}] WAIT RECV_F pending key={key} "
+                                                f"elapsed={now - wait_start:.2f}s completed={completed_flags}"
+                                            )
+                                            last_log = now
                                         time.sleep(0.001)
+                                    total_wait = time.time() - wait_start
+                                    if total_wait >= 0.1:
                                         print(
-                                            f"[rank{dist.get_rank()}] WAIT RECV_F pending completion key={key} "
-                                            f"completed={[w.is_completed() for w in works]}"
+                                            f"[rank{dist.get_rank()}] WAIT RECV_F done key={key} "
+                                            f"waited={total_wait:.2f}s"
                                         )
-                                        
                                     self._fwd_recv_posted.pop(key, None)
 
                         # 取本段前向输入
