@@ -1020,9 +1020,6 @@ class PipelineScheduleRuntimeWithDirection(schedule.PipelineScheduleMulti):
                
                 rank = action.rank
                 dest_rank = action.dest_rank
-                mapped_dest_rank = None
-                if dest_rank is not None and hasattr(stage, "stage_index_to_group_rank"):
-                    mapped_dest_rank = stage.stage_index_to_group_rank.get(dest_rank, dest_rank)
 
                 if comp_type not in (UNSHARD, RESHARD, ALL_REDUCE):
                     assert mb_ids and all(m >= 0 for m in mb_ids), \
@@ -1030,6 +1027,13 @@ class PipelineScheduleRuntimeWithDirection(schedule.PipelineScheduleMulti):
                 stage_idx = action.stage_index
                 stage = stage_index_to_stage[stage_idx]
                 stage_uses_fsdp = isinstance(stage.submod, schedule.FSDPModule)
+
+                mapped_dest_rank = None
+                if dest_rank is not None:
+                    if hasattr(stage, "stage_index_to_group_rank"):
+                        mapped_dest_rank = stage.stage_index_to_group_rank.get(dest_rank, dest_rank)
+                    elif hasattr(self, "stage_index_to_group_rank"):
+                        mapped_dest_rank = self.stage_index_to_group_rank.get(dest_rank, dest_rank)
                 
                 is_next_stage_on_this_rank = stage_idx + 1 in stage_index_to_stage
                 is_prev_stage_on_this_rank = stage_idx - 1 in stage_index_to_stage
