@@ -1539,7 +1539,7 @@ class PipelineScheduleRuntimeWithDirection(schedule.PipelineScheduleMulti):
                         _assert_unsharded(stage_idx)
 
                     # 等待下游 RECV_B
-                    print(not stage.is_last and not is_next_stage_on_this_rank)
+                    
                     if not stage.is_last and not is_next_stage_on_this_rank:
                         is_head_modal = getattr(stage, "modal_type", None) in ("text", "vision", "audio")
                         mods = tuple(action.multimodality or [])
@@ -1548,6 +1548,7 @@ class PipelineScheduleRuntimeWithDirection(schedule.PipelineScheduleMulti):
                             print("到这里1")
                             for mid in mb_ids:
                                 key_m = (stage_idx, mid, m)
+                                print(key_m in self._bwd_recv_posted)
                                 if key_m in self._bwd_recv_posted:
                                     self._bwd_recv_posted[key_m].wait()
                                     with self._async_recv_lock:
