@@ -1539,6 +1539,7 @@ class PipelineScheduleRuntimeWithDirection(schedule.PipelineScheduleMulti):
                         _assert_unsharded(stage_idx)
 
                     # 等待下游 RECV_B
+                    print(not stage.is_last and not is_next_stage_on_this_rank)
                     if not stage.is_last and not is_next_stage_on_this_rank:
                         is_head_modal = getattr(stage, "modal_type", None) in ("text", "vision", "audio")
                         mods = tuple(action.multimodality or [])
