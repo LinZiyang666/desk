@@ -1247,13 +1247,13 @@ def main():
                             mm_prev_groups = None)
         setattr(stage, "modal_type", "vision")
     elif rank == 7:
-        stage_mod = VisionEncoderMidRest(audio_enc)
+        stage_mod = VisionEncoderMidRest(vision_enc)
         stage_mod.to(device)
         stage = PipelineStage_with_mutiple_ranks(stage_mod, stage_index=0,
                             num_stages=world, device=device,
                             group=dist.group.WORLD,
                             prev_group=[1], this_group=[7], next_group=[3])
-        setattr(stage, "modal_type", "audio")
+        setattr(stage, "modal_type", "vision")
     elif rank == 2:
         stage_mod = TextStage(text_model)
         stage_mod.to(device)
