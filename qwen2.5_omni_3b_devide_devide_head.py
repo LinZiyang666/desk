@@ -324,6 +324,20 @@ class VisionFrontAndTwoLayers(nn.Module):
         self.offset = take
         self.use_checkpoint = use_checkpoint
 
+    @staticmethod
+    def _cat_pixel_values(vision_inputs):
+        if vision_inputs is None or not isinstance(vision_inputs, dict):
+            return None, None
+        if "pixel_values" in vision_inputs and vision_inputs["pixel_values"] is not None:
+            return vision_inputs["pixel_values"], vision_inputs.get("grid_thw", None)
+        if "pixel_values_list" in vision_inputs:
+            pv_list = vision_inputs["pixel_values_list"]
+            if pv_list is None or len(pv_list) == 0:
+                return None, vision_inputs.get("grid_thw", None)
+            pixel_values = torch.cat(pv_list, dim=0)
+            return pixel_values, vision_inputs.get("grid_thw", None)
+        return None, vision_inputs.get("grid_thw", None)
+
     def _maybe_ckpt(self, layer: nn.Module, hidden_states: torch.Tensor,
                     cu_seqlens: torch.Tensor, rotary_pos_emb: torch.Tensor) -> torch.Tensor:
         if self.use_checkpoint and self.training:
@@ -332,11 +346,30 @@ class VisionFrontAndTwoLayers(nn.Module):
         return layer(hidden_states, cu_seqlens=cu_seqlens, rotary_pos_emb=rotary_pos_emb)
 
     def forward(self, vision_inputs):
-        if not isinstance(vision_inputs, dict) or "pixel_values" not in vision_inputs or "grid_thw" not in vision_inputs:
-            raise KeyError("vision_inputs 必须包含 'pixel_values' 与 'grid_thw'。")
+        if vision_inputs is None:
+            return None, None, None
 
-        pixel_values = vision_inputs["pixel_values"]
-        grid_thw     = vision_inputs["grid_thw"]
+        pixel_values, grid_thw = self._cat_pixel_values(vision_inputs)
+        if grid_thw is None:
+            return None, None, None
+        if pixel_values is None:
+            grid_thw = grid_thw if torch.is_tensor(grid_thw) else torch.as_tensor(grid_thw, dtype=torch.long)
+            return None, None, grid_thw
+
+        # 对齐 dtype / device，兼容旧版 VisionStage 的行为
+        if hasattr(self.enc, "get_dtype"):
+            target_dtype = self.enc.get_dtype()
+            if pixel_values.dtype != target_dtype:
+                pixel_values = pixel_values.to(dtype=target_dtype)
+        first_param = next(self.enc.parameters(), None)
+        if first_param is not None:
+            pixel_values = pixel_values.to(first_param.device)
+        pixel_values = pixel_values.contiguous()
+        if not torch.is_tensor(grid_thw):
+            grid_thw = torch.as_tensor(grid_thw, dtype=torch.long, device=pixel_values.device)
+        else:
+            grid_thw = grid_thw.to(device=pixel_values.device)
+        grid_thw = grid_thw.contiguous()
 
         # 1) Patchify
         hidden_states = self.patch_embed(pixel_values)  # [seq_len, hidden_size]
@@ -403,6 +436,10 @@ class VisionEncoderMidRest(nn.Module):
         return layer(hidden_states, cu_seqlens=cu_seqlens, rotary_pos_emb=rotary_pos_emb)
 
     def forward(self, hidden_states, cu_window_seqlens, grid_thw):
+        if hidden_states is None or cu_window_seqlens is None or grid_thw is None:
+            # 无视觉输入时保持透传 None，兼容旧逻辑
+            return hidden_states, cu_window_seqlens, grid_thw
+
         # 1) 为剩余层计算 RoPE；重排 pos_emb 以与 Stage-A 输出的 hidden_states 顺序一致
         rotary_pos_emb = self.enc.rot_pos_emb(grid_thw)
         window_index, _ = self.enc.get_window_index(grid_thw)
