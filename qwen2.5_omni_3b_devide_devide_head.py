@@ -21,7 +21,7 @@ from transformers.models.qwen2_5_omni import Qwen2_5OmniThinkerForConditionalGen
 from transformers import AutoConfig, AutoTokenizer
 from transformers.models.qwen2_5_omni import Qwen2_5OmniThinkerForConditionalGeneration
 from transformers import AutoProcessor
-
+from typing import Dict, Any, Optional, Tuple, List
 import torch, torch.nn as nn, torch.nn.functional as F
 
 def build_causal(mask_len, device):
@@ -44,184 +44,6 @@ DEFAULT_QWEN_OMNI_SYS = (
 )
 USE_TTS_SYS = True
 
-
-from typing import Dict, Any, Optional, Tuple, List
-import os
-import torch
-import torch.nn as nn
-
-# class AudioStage(nn.Module):
-#     """
-#     A minimal AudioStage that prepares audio features for Qwen2.5-Omni audio encoder
-#     exactly as the official forward expects:
-#       - input_features: [B, n_mels, T]
-#       - feature_attention_mask: [B, T]
-#     It converts them into [n_mels, sumT], computes feature_lens / aftercnn_lens,
-#     aligns dtype/device with audio_enc, and calls audio_enc(input_features, feature_lens, aftercnn_lens).
-#     """
-
-#     def __init__(self, audio_enc: nn.Module):
-#         super().__init__()
-#         self.audio_enc = audio_enc  # e.g., Qwen2_5OmniAudioEncoder
-#         self._last_path: str = "uninitialized"
-#         # Optional, sanity check if available in your impl
-#         conv1 = getattr(self.audio_enc, "conv1", None)
-#         num_mel_bins = getattr(self.audio_enc, "num_mel_bins", None)
-#         if conv1 is not None and num_mel_bins is not None:
-#             assert conv1.in_channels == num_mel_bins, (
-#                 f"Inconsistent audio encoder config: conv1.in_channels={conv1.in_channels}, "
-#                 f"num_mel_bins={num_mel_bins}"
-#             )
-
-#     @staticmethod
-#     def _to_enc(t: torch.Tensor, ref_param: torch.nn.Parameter) -> torch.Tensor:
-#         return t.to(dtype=ref_param.dtype, device=ref_param.device)
-
-#     @torch.no_grad()
-#     def _print_debug(self, msg: str):
-#         print(msg, flush=True)
-
-#     def forward(
-#         self,
-#         audio_inputs: Dict[str, torch.Tensor],
-#         *,
-#         allow_fallback: bool = False,
-#         debug: bool = True,
-#     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-#         """
-#         Args:
-#             audio_inputs:
-#                 {
-#                   "input_features": FloatTensor [B, n_mels, T],
-#                   "feature_attention_mask": Bool/Long [B, T]
-#                 }
-#             allow_fallback: if True, on exceptions return zeros of minimal shape instead of raising
-#             debug: if True, print detailed shapes/dtypes/devices
-
-#         Returns:
-#             Tuple of tensors `(audio_hidden, feature_lens, aftercnn_lens)` where:
-#               - audio_hidden: FloatTensor [sum_aftercnn, hidden_size]
-#               - feature_lens: LongTensor [B]
-#               - aftercnn_lens: LongTensor [B]
-#         """
-#         path = "ok"
-#         conv1_w = getattr(self.audio_enc, "conv1", None)
-#         if conv1_w is None:
-#             raise RuntimeError("audio_enc must have attribute `conv1` with `weight` and `in_channels`.")
-#         ref_param = conv1_w.weight  # dtype & device reference
-#         target_device = ref_param.device
-#         target_dtype = ref_param.dtype
-
-#         # 1) fetch batch
-#         if "input_features" not in audio_inputs or "feature_attention_mask" not in audio_inputs:
-#             raise KeyError("audio_inputs must contain 'input_features' and 'feature_attention_mask' keys.")
-
-#         audio_values = audio_inputs["input_features"]            # [B, n_mels, T]
-#         feature_attention_mask = audio_inputs["feature_attention_mask"]  # [B, T]
-
-#         # 2) basic asserts
-#         if audio_values.dim() != 3:
-#             raise AssertionError(f"input_features must be 3D [B, n_mels, T], got shape {tuple(audio_values.shape)}")
-#         if feature_attention_mask.dim() != 2:
-#             raise AssertionError(f"feature_attention_mask must be 2D [B, T], got shape {tuple(feature_attention_mask.shape)}")
-
-#         B, n_mels, T = audio_values.shape
-#         if debug:
-#             self._print_debug(f"[AudioStage] input_features shape={tuple(audio_values.shape)} "
-#                               f"dtype={audio_values.dtype} device={audio_values.device}")
-#             self._print_debug(f"[AudioStage] feature_attention_mask shape={tuple(feature_attention_mask.shape)} "
-#                               f"dtype={feature_attention_mask.dtype} device={feature_attention_mask.device} "
-#                               f"sum={feature_attention_mask.sum().item()}")
-
-#         # 3) compute feature_lens & aftercnn_lens (official path)
-#         # feature_lens: number of valid frames per sample
-#         # Ensure mask is boolean
-#         if feature_attention_mask.dtype != torch.bool:
-#             feature_attention_mask = feature_attention_mask.to(dtype=torch.bool)
-
-#         feature_lens = feature_attention_mask.sum(dim=1).to(dtype=torch.long)
-#         # Align to encoder device
-#         feature_lens = feature_lens.to(device=ref_param.device, dtype=torch.long)
-
-#         # The official _get_feat_extract_output_lengths usually returns (aftercnn_lens, something_else)
-#         out = self.audio_enc._get_feat_extract_output_lengths(feature_lens)
-#         if isinstance(out, (tuple, list)) and len(out) >= 1:
-#             aftercnn_lens = out[0]
-#         else:
-#             # Some impls may directly return the length tensor
-#             aftercnn_lens = out
-#         aftercnn_lens = aftercnn_lens.to(dtype=torch.long)
-#         aftercnn_lens = aftercnn_lens.to(device=ref_param.device, dtype=torch.long)
-
-#         # 4) reshape to [n_mels, sumT] exactly as official code does:
-#         #    [B, n_mels, T] -> [B, T, n_mels] -> mask-select -> [sumT, n_mels] -> [n_mels, sumT]
-#         val = audio_values.permute(0, 2, 1)  # [B, T, n_mels]
-#         # Make sure same device/dtype (we'll finally cast feats_cat to encoder ref)
-#         if val.device != feature_attention_mask.device:
-#             val = val.to(device=feature_attention_mask.device)
-#         flat = val[feature_attention_mask]   # [sumT, n_mels]
-#         feats_cat = flat.permute(1, 0).contiguous()  # [n_mels, sumT]
-
-#         # 5) align dtype & device
-#         feats_cat = feats_cat.to(dtype=target_dtype, device=target_device)
-
-#         # 6) strong assertions
-#         assert feats_cat.dim() == 2 and feats_cat.size(0) == n_mels, \
-#             f"Audio features must be [n_mels, sumT], got {tuple(feats_cat.shape)}, expected n_mels={n_mels}"
-#         assert conv1_w.in_channels == n_mels, \
-#             f"In-channel mismatch: conv1 expects {conv1_w.in_channels}, but n_mels={n_mels}"
-
-#         if debug:
-#             self._print_debug(f"[AudioStage] feats_cat shape={tuple(feats_cat.shape)} "
-#                               f"dtype={feats_cat.dtype} device={feats_cat.device}")
-#             self._print_debug(f"[AudioStage] feature_lens list={feature_lens.tolist()} dtype={feature_lens.dtype} device={feature_lens.device}")
-#             self._print_debug(f"[AudioStage] aftercnn_lens list={aftercnn_lens.tolist()} dtype={aftercnn_lens.dtype} device={aftercnn_lens.device}")
-#             self._print_debug(f"[AudioStage] conv1.in_channels={conv1_w.in_channels}")
-
-#         # 7) call encoder, with optional fallback
-#         try:
-#             enc_out = self.audio_enc(
-#                 input_features=feats_cat,    # [n_mels, sumT]
-#                 feature_lens=feature_lens,   # [B]
-#                 aftercnn_lens=aftercnn_lens  # [B]
-#             )
-#             audio_hidden = enc_out.last_hidden_state  # [sum_aftercnn, hidden_size]
-#         except Exception as e:
-#             if allow_fallback:
-#                 if debug:
-#                     self._print_debug("[AudioStage] audio_enc failed; using zeros_fallback")
-#                     self._print_debug(f"[AudioStage] exception: {repr(e)}")
-#                 # Fallback: minimal zeros (cannot know sum_aftercnn/hidden_size reliably; try to infer)
-#                 hidden_size = getattr(self.audio_enc, "hidden_size", None)
-#                 if hidden_size is None:
-#                     # probe from a param if available
-#                     for p in self.audio_enc.parameters():
-#                         if p.dim() >= 2:
-#                             hidden_size = p.size(-1)
-#                             break
-#                 if hidden_size is None:
-#                     hidden_size = 2048  # last resort
-#                 audio_hidden = torch.zeros((1, hidden_size), dtype=target_dtype, device=target_device)
-#                 path = "zeros_fallback"
-#             else:
-#                 # re-raise to expose real issue during dev
-#                 raise
-
-#         if debug:
-#             self._print_debug(
-#                 f"[AudioStage] audio_hidden shape={tuple(audio_hidden.shape)} "
-#                 f"dtype={audio_hidden.dtype} device={audio_hidden.device} path={path}"
-#             )
-
-#         # Track the most recent execution path for optional external inspection.
-#         self._last_path = path
-
-#         return audio_hidden, feature_lens, aftercnn_lens
-
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-from typing import Dict, Tuple, Optional
 
 class AudioFrontAndTwoLayers(nn.Module):
     """
@@ -359,77 +181,255 @@ class AudioEncoderMidFive(nn.Module):
             hidden_states = self._maybe_ckpt(layer, hidden_states, cu_seqlens)
         return hidden_states.contiguous(), cu_seqlens.contiguous(), aftercnn_lens.contiguous()
 
-# # -------------------------- Optional smoke test --------------------------
-# def _smoke_test_audio_stage(stage: AudioStage) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-#     """
-#     Minimal sanity test. Adjust T and mask as needed.
-#     """
-#     device = next(stage.audio_enc.parameters()).device
-#     dtype = next(stage.audio_enc.parameters()).dtype
-#     n_mels = stage.audio_enc.conv1.in_channels
-#     B, T = 2, 320  # toy lengths
-
-#     x = torch.randn(B, n_mels, T, device=device, dtype=dtype)
-#     mask = torch.ones(B, T, device=device, dtype=torch.bool)
-
-#     batch = {"input_features": x, "feature_attention_mask": mask}
-#     return stage.forward(batch, allow_fallback=False, debug=True)
 
 
-class VisionStage(nn.Module):
-    def __init__(self, vision_enc):
-        super().__init__()
-        self.vision_enc = vision_enc
+# class VisionStage(nn.Module):
+#     def __init__(self, vision_enc):
+#         super().__init__()
+#         self.vision_enc = vision_enc
 
-    @staticmethod
-    def _cat_pixel_values(vision_inputs):
-        if vision_inputs is None or not isinstance(vision_inputs, dict):
-            return None, None
-        if "pixel_values_list" in vision_inputs:
-            pv_list = vision_inputs["pixel_values_list"]
-            if pv_list is None or len(pv_list) == 0:
-                return None, vision_inputs.get("grid_thw", None)
-            pv = torch.cat(pv_list, dim=0)
-            return pv, vision_inputs.get("grid_thw", None)
-        return vision_inputs.get("pixel_values", None), vision_inputs.get("grid_thw", None)
+#     @staticmethod
+#     def _cat_pixel_values(vision_inputs):
+#         if vision_inputs is None or not isinstance(vision_inputs, dict):
+#             return None, None
+#         if "pixel_values_list" in vision_inputs:
+#             pv_list = vision_inputs["pixel_values_list"]
+#             if pv_list is None or len(pv_list) == 0:
+#                 return None, vision_inputs.get("grid_thw", None)
+#             pv = torch.cat(pv_list, dim=0)
+#             return pv, vision_inputs.get("grid_thw", None)
+#         return vision_inputs.get("pixel_values", None), vision_inputs.get("grid_thw", None)
 
-    def forward(self, vision_inputs):
-        """
-        返回: image_embeds, grid_thw
-        要求: collate 后的 pixel_values_list 拼接顺序与 input_ids 中 image_token 的扫描顺序一致。
-        """
-        if vision_inputs is None:
-            return None, None
+#     def forward(self, vision_inputs):
+#         """
+#         返回: image_embeds, grid_thw
+#         要求: collate 后的 pixel_values_list 拼接顺序与 input_ids 中 image_token 的扫描顺序一致。
+#         """
+#         if vision_inputs is None:
+#             return None, None
 
-        pixel_values, grid_thw = self._cat_pixel_values(vision_inputs)
-        if pixel_values is None:
-            return None, grid_thw
+#         pixel_values, grid_thw = self._cat_pixel_values(vision_inputs)
+#         if pixel_values is None:
+#             return None, grid_thw
 
-        if hasattr(self.vision_enc, "get_dtype"):
-            pixel_values = pixel_values.type(self.vision_enc.get_dtype())
-        pixel_values = pixel_values.to(next(self.vision_enc.parameters()).device if hasattr(self.vision_enc, "parameters") else pixel_values.device)
+#         if hasattr(self.vision_enc, "get_dtype"):
+#             pixel_values = pixel_values.type(self.vision_enc.get_dtype())
+#         pixel_values = pixel_values.to(next(self.vision_enc.parameters()).device if hasattr(self.vision_enc, "parameters") else pixel_values.device)
 
         
-        image_embeds = self.vision_enc(pixel_values, grid_thw=grid_thw)
+#         image_embeds = self.vision_enc(pixel_values, grid_thw=grid_thw)
     
 
-        # 添加padding逻辑确保输出shape一致
-        if image_embeds is not None:
-            # 设定一个固定的最大长度（根据错误信息，期望长度是252）
-            MAX_VISION_TOKENS = 252  # 根据pipeline期望的shape设置
+#         # 添加padding逻辑确保输出shape一致
+#         if image_embeds is not None:
+#             # 设定一个固定的最大长度（根据错误信息，期望长度是252）
+#             MAX_VISION_TOKENS = 252  # 根据pipeline期望的shape设置
 
-            current_len = image_embeds.shape[0]  # 当前序列长度
-            if current_len < MAX_VISION_TOKENS:
-                # Padding到固定长度
-                pad_len = MAX_VISION_TOKENS - current_len
-                embed_dim = image_embeds.shape[1]
-                padding = torch.zeros(pad_len, embed_dim, device=image_embeds.device, dtype=image_embeds.dtype)
-                image_embeds = torch.cat([image_embeds, padding], dim=0)
-            elif current_len > MAX_VISION_TOKENS:
-                # 截断到固定长度
-                image_embeds = image_embeds[:MAX_VISION_TOKENS]
+#             current_len = image_embeds.shape[0]  # 当前序列长度
+#             if current_len < MAX_VISION_TOKENS:
+#                 # Padding到固定长度
+#                 pad_len = MAX_VISION_TOKENS - current_len
+#                 embed_dim = image_embeds.shape[1]
+#                 padding = torch.zeros(pad_len, embed_dim, device=image_embeds.device, dtype=image_embeds.dtype)
+#                 image_embeds = torch.cat([image_embeds, padding], dim=0)
+#             elif current_len > MAX_VISION_TOKENS:
+#                 # 截断到固定长度
+#                 image_embeds = image_embeds[:MAX_VISION_TOKENS]
 
-        return (image_embeds.contiguous() if image_embeds is not None else None), grid_thw
+#         return (image_embeds.contiguous() if image_embeds is not None else None), grid_thw
+
+
+# class TextStage(nn.Module):
+#     def __init__(self, text_model):
+#         super().__init__()
+#         self.text_model = text_model
+#         self.embed_tokens = text_model.embed_tokens
+
+#     def forward(self, input_ids, attention_mask=None):
+#         """
+#         返回:
+#             hidden: [B, T, H]
+#             attn_4d: [B, 1, T, T]（含 pad 与因果遮罩）
+#             position_ids: 这里返回 None，交由 Stage1 统一计算（含多模态感知索引）
+#         """
+#         import time
+#         _t0 = time.perf_counter()
+#         device = input_ids.device
+#         B, T = input_ids.shape
+
+#         # 文本嵌入
+#         _t_emb0 = time.perf_counter()
+#         hidden = self.embed_tokens(input_ids)
+#         _t_emb1 = time.perf_counter()
+
+#         # 4D attention mask（因果+pad）
+#         if attention_mask is None:
+#             attention_mask = torch.ones(B, T, dtype=torch.long, device=device)
+#         _t_attn0 = time.perf_counter()
+#         attn_4d = build_causal(T, device=device).expand(B, -1, -1, -1).clone()
+#         pad = (attention_mask == 0).view(B, 1, 1, T)
+#         attn_4d = attn_4d.masked_fill(pad, float("-inf")).contiguous()
+#         _t_attn1 = time.perf_counter()
+
+#         # 在头部阶段直接给出基础 position_ids（三路堆叠），避免下游元信息校验因 None 失败
+#         _t_pos0 = time.perf_counter()
+#         base_pos = torch.arange(T, device=device).unsqueeze(0).repeat(B, 1)
+#         position_ids = torch.stack([base_pos, base_pos, base_pos], dim=0).contiguous()
+#         _t_pos1 = time.perf_counter()
+#         # 额外返回 input_ids 和 attention_mask，供 packing 阶段做多模态替换与位置计算
+#         out = (hidden.contiguous(), attn_4d.contiguous(), position_ids, input_ids.contiguous(), attention_mask.contiguous())
+#         try:
+            
+#             rid = dist.get_rank() if dist.is_initialized() else -1
+#             _ms = (time.perf_counter() - _t0) * 1000.0
+#             # 简要统计，避免过重代价
+#             attn_sum = int(attention_mask.sum().item()) if isinstance(attention_mask, torch.Tensor) else -1
+#             uid_min = int(input_ids.min().item()) if isinstance(input_ids, torch.Tensor) else -1
+#             uid_max = int(input_ids.max().item()) if isinstance(input_ids, torch.Tensor) else -1
+#             emb_ms = (_t_emb1 - _t_emb0) * 1000.0
+#             attn_ms = (_t_attn1 - _t_attn0) * 1000.0
+#             pos_ms = (_t_pos1 - _t_pos0) * 1000.0
+#             ham = float(hidden.detach().abs().mean().item()) if isinstance(hidden, torch.Tensor) else float('nan')
+#             try:
+#                 w = self.embed_tokens.weight
+#                 enorm = float(w.detach().norm().item())
+#             except Exception:
+#                 enorm = float('nan')
+#             print(f"[rank{rid}] TextStage.forward: B={B} T={T} attn_sum={attn_sum} input_ids[min,max]=({uid_min},{uid_max}) took={_ms:.2f}ms; parts: emb={emb_ms:.2f}ms, attn={attn_ms:.2f}ms, pos={pos_ms:.2f}ms; hidden_abs_mean={ham:.3e}, embed_norm={enorm:.3e}")
+#         except Exception:
+#             pass
+#         return out
+
+class VisionFrontAndTwoLayers(nn.Module):
+    """
+    Stage-A (Vision):
+      - 输入: vision_inputs = {
+            "pixel_values": FloatTensor,   # 原始视觉输入（图像/视频堆栈），形状与官方一致
+            "grid_thw":   LongTensor       # [num_imgs_or_vids, 3]，LLM 尺度下 (T,H,W)
+        }
+      - 逻辑: PatchEmbed → 计算 RoPE → 计算并应用窗口重排（只在本段做一次）→ 过前2层 VisionBlock
+      - 输出: (hidden_states_A, cu_window_seqlens, grid_thw)  # 后两项供 Stage-B 复用/透传
+    """
+    def __init__(self, enc: nn.Module, use_checkpoint: bool = False):
+        super().__init__()
+        # 引用原 VisionEncoder 的关键成员（权重共享）
+        self.enc = enc  # Qwen2_5OmniVisionEncoder
+        self.patch_embed = enc.patch_embed
+        self.spatial_merge_size = enc.spatial_merge_size
+        self.spatial_merge_unit = enc.spatial_merge_unit
+        self.fullatt_block_indexes = set(int(i) for i in enc.fullatt_block_indexes)
+        # 仅取前两层
+        take = min(2, len(enc.blocks))
+        self.blocks = nn.ModuleList([enc.blocks[i] for i in range(take)])
+        self.offset = take
+        self.use_checkpoint = use_checkpoint
+
+    def _maybe_ckpt(self, layer: nn.Module, hidden_states: torch.Tensor,
+                    cu_seqlens: torch.Tensor, rotary_pos_emb: torch.Tensor) -> torch.Tensor:
+        if self.use_checkpoint and self.training:
+            fn = lambda hs, cs, rp: layer(hs, cu_seqlens=cs, rotary_pos_emb=rp)
+            return torch.utils.checkpoint.checkpoint(fn, hidden_states, cu_seqlens, rotary_pos_emb, use_reentrant=False)
+        return layer(hidden_states, cu_seqlens=cu_seqlens, rotary_pos_emb=rotary_pos_emb)
+
+    def forward(self, vision_inputs):
+        if not isinstance(vision_inputs, dict) or "pixel_values" not in vision_inputs or "grid_thw" not in vision_inputs:
+            raise KeyError("vision_inputs 必须包含 'pixel_values' 与 'grid_thw'。")
+
+        pixel_values = vision_inputs["pixel_values"]
+        grid_thw     = vision_inputs["grid_thw"]
+
+        # 1) Patchify
+        hidden_states = self.patch_embed(pixel_values)  # [seq_len, hidden_size]
+
+        # 2) RoPE（按 LLM 尺度的 (T,H,W)）
+        rotary_pos_emb = self.enc.rot_pos_emb(grid_thw)
+
+        # 3) 窗口索引与 varlen seqlens（窗口注意力）
+        window_index, cu_window_seqlens = self.enc.get_window_index(grid_thw)
+        cu_window_seqlens = torch.tensor(
+            cu_window_seqlens,
+            device=hidden_states.device,
+            dtype=grid_thw.dtype if torch.jit.is_tracing() else torch.int32,
+        )
+        cu_window_seqlens = torch.unique_consecutive(cu_window_seqlens)
+
+        # 将 token 与 pos_emb 都重排到“窗口顺序”
+        seq_len, _ = hidden_states.size()
+        s2 = self.spatial_merge_unit
+        hidden_states = hidden_states.reshape(seq_len // s2, s2, -1)[window_index, :, :].reshape(seq_len, -1)
+        rotary_pos_emb = rotary_pos_emb.reshape(seq_len // s2, s2, -1)[window_index, :, :].reshape(seq_len, -1)
+
+        # 4) 全局 seqlens（供全局注意力层使用）
+        cu_seqlens = torch.repeat_interleave(grid_thw[:, 1] * grid_thw[:, 2], grid_thw[:, 0]).cumsum(
+            dim=0, dtype=grid_thw.dtype if torch.jit.is_tracing() else torch.int32
+        )
+        cu_seqlens = F.pad(cu_seqlens, (1, 0), value=0)
+
+        # 5) 前两层 Transformer（按配置在窗口/全局二者间切换）
+        for layer_idx, blk in enumerate(self.blocks):
+            global_attn = (layer_idx in self.fullatt_block_indexes)
+            cu_now = cu_seqlens if global_attn else cu_window_seqlens
+            hidden_states = self._maybe_ckpt(blk, hidden_states, cu_now, rotary_pos_emb)
+
+        # 输出三元组，供 Stage-B 继续使用（保持与音频拆段接口风格一致）
+        return hidden_states.contiguous(), cu_window_seqlens.contiguous(), grid_thw.contiguous()
+
+
+class VisionEncoderMidRest(nn.Module):
+    """
+    Stage-B (Vision):
+      - 输入: (hidden_states: [seq_len, hidden], cu_window_seqlens: [W+1], grid_thw: [N,3])
+      - 逻辑: 重新计算 RoPE 与 window_index（仅用于对齐 pos_emb；hidden 不再重排）→
+             过剩余层（按层决定窗口/全局注意力）→ merger → 逆序恢复到原始顺序
+      - 输出: (hidden_states, cu_window_seqlens, grid_thw)  # 后二者透传，便于与你既有流水线对齐
+    """
+    def __init__(self, enc: nn.Module, use_checkpoint: bool = False):
+        super().__init__()
+        self.enc = enc
+        self.spatial_merge_unit = enc.spatial_merge_unit
+        self.fullatt_block_indexes = set(int(i) for i in enc.fullatt_block_indexes)
+        # 取剩余层
+        take = min(2, len(enc.blocks))
+        self.offset = take
+        self.blocks = nn.ModuleList([enc.blocks[i] for i in range(self.offset, len(enc.blocks))])
+        self.merger = enc.merger
+        self.use_checkpoint = use_checkpoint
+
+    def _maybe_ckpt(self, layer: nn.Module, hidden_states: torch.Tensor,
+                    cu_seqlens: torch.Tensor, rotary_pos_emb: torch.Tensor) -> torch.Tensor:
+        if self.use_checkpoint and self.training:
+            fn = lambda hs, cs, rp: layer(hs, cu_seqlens=cs, rotary_pos_emb=rp)
+            return torch.utils.checkpoint.checkpoint(fn, hidden_states, cu_seqlens, rotary_pos_emb, use_reentrant=False)
+        return layer(hidden_states, cu_seqlens=cu_seqlens, rotary_pos_emb=rotary_pos_emb)
+
+    def forward(self, hidden_states, cu_window_seqlens, grid_thw):
+        # 1) 为剩余层计算 RoPE；重排 pos_emb 以与 Stage-A 输出的 hidden_states 顺序一致
+        rotary_pos_emb = self.enc.rot_pos_emb(grid_thw)
+        window_index, _ = self.enc.get_window_index(grid_thw)
+        seq_len, _ = hidden_states.size()
+        s2 = self.spatial_merge_unit
+        rotary_pos_emb = rotary_pos_emb.reshape(seq_len // s2, s2, -1)[window_index, :, :].reshape(seq_len, -1)
+
+        # 2) 全局 seqlens（供全局注意力层使用）
+        cu_seqlens = torch.repeat_interleave(grid_thw[:, 1] * grid_thw[:, 2], grid_thw[:, 0]).cumsum(
+            dim=0, dtype=grid_thw.dtype if torch.jit.is_tracing() else torch.int32
+        )
+        cu_seqlens = F.pad(cu_seqlens, (1, 0), value=0)
+
+        # 3) 依次通过剩余层（注意：global 层索引 = 本地 layer_idx + offset）
+        for local_idx, blk in enumerate(self.blocks):
+            global_attn = ((local_idx + self.offset) in self.fullatt_block_indexes)
+            cu_now = cu_seqlens if global_attn else cu_window_seqlens
+            hidden_states = self._maybe_ckpt(blk, hidden_states, cu_now, rotary_pos_emb)
+
+        # 4) merger + 逆序恢复
+        hidden_states = self.merger(hidden_states)
+        reverse_indices = torch.argsort(window_index)
+        hidden_states = hidden_states[reverse_indices, :]
+
+        # 与音频拆段风格统一，返回三元组（后两项透传）
+        return hidden_states.contiguous(), cu_window_seqlens.contiguous(), grid_thw.contiguous()
+
 
 
 class TextStage(nn.Module):
@@ -492,8 +492,6 @@ class TextStage(nn.Module):
         except Exception:
             pass
         return out
-
-
 # -----------------------------
 # Stage1: 先做 pack（按特殊 token 替换 embedding），再计算/补全 position_ids，最后跑 L1 层 Transformer
 # -----------------------------
@@ -999,6 +997,40 @@ def create_pipeline_actions():
         _Action(0, 1, 15, _ComputationType.FULL_BACKWARD, (3), None, None, None, None, None, ["vision"]),
     ]
     
+    rank7_actions = [
+        _Action(0, 7, 0, _ComputationType.RECV_F, (0,), 1, None, None, None, None, ["vision"]),
+        _Action(0, 7, 1, _ComputationType.FORWARD, (0), None, None, None, None, None, ["vision"]),
+        _Action(0, 7, 2, _ComputationType.SEND_F, (0,), 3, None, None, None, None, ["vision"]),
+    
+        _Action(0, 7, 3, _ComputationType.RECV_F, (1,), 1, None, None, None, None, ["vision"]),
+        _Action(0, 7, 4, _ComputationType.FORWARD, (1), None, None, None, None, None, ["vision"]),
+        _Action(0, 7, 5, _ComputationType.SEND_F, (1,), 3, None, None, None, None, ["vision"]),
+    
+        _Action(0, 7, 6, _ComputationType.RECV_F, (2,), 1, None, None, None, None, ["vision"]),
+        _Action(0, 7, 7, _ComputationType.FORWARD, (2), None, None, None, None, None, ["vision"]),
+        _Action(0, 7, 8, _ComputationType.SEND_F, (2,), 3, None, None, None, None, ["vision"]),
+    
+        _Action(0, 7, 9, _ComputationType.RECV_F, (3,), 1, None, None, None, None, ["vision"]),
+        _Action(0, 7, 10, _ComputationType.FORWARD, (3), None, None, None, None, None, ["vision"]),
+        _Action(0, 7, 11, _ComputationType.SEND_F, (3,), 3, None, None, None, None, ["vision"]),
+        
+        _Action(0, 7, 12, _ComputationType.RECV_B, (0,), 3, None, None, None, None, ["vision"]),
+        _Action(0, 7, 13, _ComputationType.FULL_BACKWARD, (0), None, None, None, None, None, ["vision"]),
+        _Action(0, 7, 14, _ComputationType.SEND_B, (0,), 1, None, None, None, None, ["vision"]),
+    
+        _Action(0, 7, 15, _ComputationType.RECV_B, (1,), 3, None, None, None, None, ["vision"]),
+        _Action(0, 7, 16, _ComputationType.FULL_BACKWARD, (1), None, None, None, None, None, ["vision"]),
+        _Action(0, 7, 17, _ComputationType.SEND_B, (1,), 1, None, None, None, None, ["vision"]),
+    
+        _Action(0, 7, 18, _ComputationType.RECV_B, (2,), 3, None, None, None, None, ["vision"]),
+        _Action(0, 7, 19, _ComputationType.FULL_BACKWARD, (2), None, None, None, None, None, ["vision"]),
+        _Action(0, 7, 20, _ComputationType.SEND_B, (2,), 1, None, None, None, None, ["vision"]),
+    
+        _Action(0, 7, 21, _ComputationType.RECV_B, (3,), 3, None, None, None, None, ["vision"]),
+        _Action(0, 7, 22, _ComputationType.FULL_BACKWARD, (3), None, None, None, None, None, ["vision"]),
+        _Action(0, 7, 23, _ComputationType.SEND_B, (3,), 1, None, None, None, None, ["vision"]),
+    ]
+    
     rank2_actions = [
         _Action(0, 2, 0, _ComputationType.FORWARD, (0), None, None, None, None, None, ["text"]),
         _Action(0, 2, 1, _ComputationType.SEND_F, (0,), 3, None, None, None, None, ["text"]),
@@ -1205,15 +1237,23 @@ def main():
                             prev_group=[0], this_group=[6], next_group=[3])
         setattr(stage, "modal_type", "audio")
     elif rank == 1:
-        stage_mod = VisionStage(vision_enc)
+        stage_mod = VisionFrontAndTwoLayers(vision_enc)
         stage_mod.to(device)
         stage = PipelineStage_Multimodality(stage_mod, stage_index=0,
                             num_stages=world, device=device,
                             group=dist.group.WORLD,
-                            prev_group=None, this_group=[1], next_group=[3],
+                            prev_group=None, this_group=[1], next_group=[7],
                             model_type = "vision",
                             mm_prev_groups = None)
         setattr(stage, "modal_type", "vision")
+    elif rank == 6:
+        stage_mod = VisionEncoderMidRest(audio_enc)
+        stage_mod.to(device)
+        stage = PipelineStage_with_mutiple_ranks(stage_mod, stage_index=0,
+                            num_stages=world, device=device,
+                            group=dist.group.WORLD,
+                            prev_group=[1], this_group=[7], next_group=[3])
+        setattr(stage, "modal_type", "audio")
     elif rank == 2:
         stage_mod = TextStage(text_model)
         stage_mod.to(device)
@@ -1231,9 +1271,9 @@ def main():
         stage = PipelineStage_Multimodality(stage_mod, stage_index=1,
                             num_stages=world, device=device,
                             group=dist.group.WORLD,
-                            prev_group=[6,1,2], this_group=[3], next_group=[4],
+                            prev_group=[6,7,2], this_group=[3], next_group=[4],
                             model_type = "packing",
-                            mm_prev_groups = {"audio":[6],"vision":[1],"text":[2]})
+                            mm_prev_groups = {"audio":[6],"vision":[7],"text":[2]})
         setattr(stage, "modal_type", "packing")
     elif rank == 4:
         stage_mod = Stage2(text_model, L1, L2)
