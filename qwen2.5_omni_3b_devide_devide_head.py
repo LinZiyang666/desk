@@ -1246,7 +1246,7 @@ def main():
                             model_type = "vision",
                             mm_prev_groups = None)
         setattr(stage, "modal_type", "vision")
-    elif rank == 6:
+    elif rank == 7:
         stage_mod = VisionEncoderMidRest(audio_enc)
         stage_mod.to(device)
         stage = PipelineStage_with_mutiple_ranks(stage_mod, stage_index=0,
