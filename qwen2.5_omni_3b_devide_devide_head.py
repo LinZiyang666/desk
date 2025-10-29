@@ -371,6 +371,24 @@ class VisionFrontAndTwoLayers(nn.Module):
             grid_thw = grid_thw.to(device=pixel_values.device)
         grid_thw = grid_thw.contiguous()
 
+        if grid_thw.numel() == 0 or pixel_values.numel() == 0:
+            try:
+                rid = dist.get_rank() if dist.is_initialized() else -1
+                print(f"[rank{rid}] VisionFrontAndTwoLayers.forward: empty tensors detected pixel_values_shape={tuple(pixel_values.shape)} grid_thw_shape={tuple(grid_thw.shape)}; returning None")
+            except Exception:
+                pass
+            return None, None, None
+
+        debug_cnt = getattr(self, "_debug_cnt", 0)
+        if debug_cnt < 4:
+            try:
+                rid = dist.get_rank() if dist.is_initialized() else -1
+                grid_info = grid_thw.tolist() if grid_thw.numel() <= 12 else grid_thw[:min(4, grid_thw.size(0))].tolist()
+                print(f"[rank{rid}] VisionFrontAndTwoLayers.forward (debug): pixel_values_shape={tuple(pixel_values.shape)} grid_thw_shape={tuple(grid_thw.shape)} grid_sample={grid_info}")
+            except Exception:
+                pass
+            self._debug_cnt = debug_cnt + 1
+
         # 1) Patchify
         hidden_states = self.patch_embed(pixel_values)  # [seq_len, hidden_size]
 
@@ -439,6 +457,27 @@ class VisionEncoderMidRest(nn.Module):
         if hidden_states is None or cu_window_seqlens is None or grid_thw is None:
             # 无视觉输入时保持透传 None，兼容旧逻辑
             return hidden_states, cu_window_seqlens, grid_thw
+        if (
+            (torch.is_tensor(hidden_states) and hidden_states.numel() == 0)
+            or (torch.is_tensor(cu_window_seqlens) and cu_window_seqlens.numel() == 0)
+            or (torch.is_tensor(grid_thw) and grid_thw.numel() == 0)
+        ):
+            try:
+                rid = dist.get_rank() if dist.is_initialized() else -1
+                print(f"[rank{rid}] VisionEncoderMidRest.forward: received empty tensors; bypassing vision path")
+            except Exception:
+                pass
+            return None, None, None
+
+        debug_cnt = getattr(self, "_debug_cnt", 0)
+        if debug_cnt < 4:
+            try:
+                rid = dist.get_rank() if dist.is_initialized() else -1
+                grid_info = grid_thw.tolist() if grid_thw.numel() <= 12 else grid_thw[:min(4, grid_thw.size(0))].tolist()
+                print(f"[rank{rid}] VisionEncoderMidRest.forward (debug): hidden_states_shape={tuple(hidden_states.shape)} cu_window_len={tuple(cu_window_seqlens.shape)} grid_thw_shape={tuple(grid_thw.shape)} grid_sample={grid_info}")
+            except Exception:
+                pass
+            self._debug_cnt = debug_cnt + 1
 
         # 1) 为剩余层计算 RoPE；重排 pos_emb 以与 Stage-A 输出的 hidden_states 顺序一致
         rotary_pos_emb = self.enc.rot_pos_emb(grid_thw)
