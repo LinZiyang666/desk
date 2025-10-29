@@ -468,6 +468,13 @@ class VisionEncoderMidRest(nn.Module):
             except Exception:
                 pass
             return None, None, None
+        if torch.is_tensor(grid_thw) and torch.all(grid_thw == 0):
+            # 形状推理阶段会传入全零 grid_thw；直接返回占位即可，避免在 rot_pos_emb 中出现 0 维冲突
+            return (
+                hidden_states.contiguous() if torch.is_tensor(hidden_states) else hidden_states,
+                cu_window_seqlens.contiguous() if torch.is_tensor(cu_window_seqlens) else cu_window_seqlens,
+                grid_thw,
+            )
 
         debug_cnt = getattr(self, "_debug_cnt", 0)
         if debug_cnt < 4:
