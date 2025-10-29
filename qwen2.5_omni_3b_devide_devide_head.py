@@ -1168,7 +1168,7 @@ def create_pipeline_actions():
     ]
 
 
-    return {0: rank0_actions, 1: rank1_actions, 2: rank2_actions, 3: rank3_actions, 4: rank4_actions, 5: rank5_actions, 6: rank6_actions}
+    return {0: rank0_actions, 1: rank1_actions, 2: rank2_actions, 3: rank3_actions, 4: rank4_actions, 5: rank5_actions, 6: rank6_actions, 7: rank7_actions}
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--train_steps", type=int, default=1,
