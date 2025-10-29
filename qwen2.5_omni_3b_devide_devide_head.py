@@ -979,21 +979,21 @@ def create_pipeline_actions():
 
     rank1_actions = [
         _Action(0, 1, 0, _ComputationType.FORWARD, (0), None, None, None, None, None, ["vision"]),
-        _Action(0, 1, 1, _ComputationType.SEND_F, (0,), 3, None, None, None, None, ["vision"]),
+        _Action(0, 1, 1, _ComputationType.SEND_F, (0,), 7, None, None, None, None, ["vision"]),
         _Action(0, 1, 2, _ComputationType.FORWARD, (1), None, None, None, None, None, ["vision"]),
-        _Action(0, 1, 3, _ComputationType.SEND_F, (1,), 3, None, None, None, None, ["vision"]),
+        _Action(0, 1, 3, _ComputationType.SEND_F, (1,), 7, None, None, None, None, ["vision"]),
         _Action(0, 1, 4, _ComputationType.FORWARD, (2), None, None, None, None, None, ["vision"]),
-        _Action(0, 1, 5, _ComputationType.SEND_F, (2,), 3, None, None, None, None, ["vision"]),
+        _Action(0, 1, 5, _ComputationType.SEND_F, (2,), 7, None, None, None, None, ["vision"]),
         _Action(0, 1, 6, _ComputationType.FORWARD, (3), None, None, None, None, None, ["vision"]),
-        _Action(0, 1, 7, _ComputationType.SEND_F, (3,), 3, None, None, None, None, ["vision"]),
+        _Action(0, 1, 7, _ComputationType.SEND_F, (3,), 7, None, None, None, None, ["vision"]),
 
-        _Action(0, 1, 8, _ComputationType.RECV_B, (0,), 3, None, None, None, None, ["vision"]),
+        _Action(0, 1, 8, _ComputationType.RECV_B, (0,), 7, None, None, None, None, ["vision"]),
         _Action(0, 1, 9, _ComputationType.FULL_BACKWARD, (0), None, None, None, None, None, ["vision"]),
-        _Action(0, 1, 10, _ComputationType.RECV_B, (1,), 3, None, None, None, None, ["vision"]),
+        _Action(0, 1, 10, _ComputationType.RECV_B, (1,), 7, None, None, None, None, ["vision"]),
         _Action(0, 1, 11, _ComputationType.FULL_BACKWARD, (1), None, None, None, None, None, ["vision"]),
-        _Action(0, 1, 12, _ComputationType.RECV_B, (2,), 3, None, None, None, None, ["vision"]),
+        _Action(0, 1, 12, _ComputationType.RECV_B, (2,), 7, None, None, None, None, ["vision"]),
         _Action(0, 1, 13, _ComputationType.FULL_BACKWARD, (2), None, None, None, None, None, ["vision"]),
-        _Action(0, 1, 14, _ComputationType.RECV_B, (3,), 3, None, None, None, None, ["vision"]),
+        _Action(0, 1, 14, _ComputationType.RECV_B, (3,), 7, None, None, None, None, ["vision"]),
         _Action(0, 1, 15, _ComputationType.FULL_BACKWARD, (3), None, None, None, None, None, ["vision"]),
     ]
     
