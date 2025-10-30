@@ -650,10 +650,16 @@ class PipelineScheduleRuntimeWithDirection(schedule.PipelineScheduleMulti):
                 start_ns_k = time.time_ns()
                 works_k = schedule._batch_p2p(sub_ops)
 
+                if modality is not None:
+                    mm_for_event = [modality]
+                else:
+                    mm_for_event = list(action.multimodality) if action.multimodality is not None else None
+
                 # 仅记录，保持向后兼容；如你扩展了 recorder，可也传 modality
                 self._rec.record_async(
                     current_batch+1, action.id, kind, stage_idx, mb_index,
-                    works_k, start_ns_k, chunk_idx=chunk_idx
+                    works_k, start_ns_k, chunk_idx=chunk_idx,
+                    multimodality=mm_for_event,
                 )
 
                 with self._async_recv_lock:
@@ -718,9 +724,22 @@ class PipelineScheduleRuntimeWithDirection(schedule.PipelineScheduleMulti):
                     self._async_send_works[current_batch+1].append(works_k)
 
                 start_ns_k = time.time_ns()
+                if modality is not None:
+                    mm_for_event = [modality]
+                else:
+                    mm_for_event = list(action.multimodality) if action.multimodality is not None else None
                 # 记录器保持向后兼容；如果你扩展了 recorder，可把 modality 加为额外字段
-                self._rec.record_async(current_batch+1, action.id, kind, stage_idx, mb_index,
-                                    works_k, start_ns_k, chunk_idx=chunk_idx)
+                self._rec.record_async(
+                    current_batch+1,
+                    action.id,
+                    kind,
+                    stage_idx,
+                    mb_index,
+                    works_k,
+                    start_ns_k,
+                    chunk_idx=chunk_idx,
+                    multimodality=mm_for_event,
+                )
 
         t = threading.Thread(
             target=worker,
@@ -1429,7 +1448,17 @@ class PipelineScheduleRuntimeWithDirection(schedule.PipelineScheduleMulti):
                         for mid in mb_ids:
                             self._mb_to_group[(stage_idx, mid)] = g_id
                             
-                    with self._rec.record(current_batch+1,action_id,"FORWARD", stage_idx, mb_ids):
+                    mm_for_event = (
+                        list(action.multimodality) if action.multimodality is not None else None
+                    )
+                    with self._rec.record(
+                        current_batch+1,
+                        action_id,
+                        "FORWARD",
+                        stage_idx,
+                        mb_ids,
+                        multimodality=mm_for_event,
+                    ):
                         output = stage.forward_one_chunk(rep_id, cat_args, cat_kwargs, len(mb_ids))
 
                     big_key = (stage_idx, rep_id)
@@ -1608,7 +1637,17 @@ class PipelineScheduleRuntimeWithDirection(schedule.PipelineScheduleMulti):
                     # packing 上保留计算图，避免多模态梯度尚未全部发完
                     retain_for_pack = (getattr(stage, "modal_type", None) == "packing")
 
-                    with self._rec.record(current_batch+1, action_id, "FULL_BACKWARD", stage_idx, mb_ids):
+                    mm_for_event = (
+                        list(action.multimodality) if action.multimodality is not None else None
+                    )
+                    with self._rec.record(
+                        current_batch+1,
+                        action_id,
+                        "FULL_BACKWARD",
+                        stage_idx,
+                        mb_ids,
+                        multimodality=mm_for_event,
+                    ):
                         stage.backward_one_chunk(
                             rep_id,
                             loss=cat_loss,
@@ -1640,7 +1679,17 @@ class PipelineScheduleRuntimeWithDirection(schedule.PipelineScheduleMulti):
                         print(f"[{dist.get_rank()}]: batch {current_batch+1} ALL_REDUCE for stage {stage_idx}, upstream bandwidth {action.upstream} mbps")
                     else:
                         print(f"[{dist.get_rank()}]: batch {current_batch+1} ALL_REDUCE for stage {stage_idx}")
-                    with self._rec.record(current_batch+1,action_id,"ALL_REDUCE", stage_idx, -1):  # -1 not specific microbatch
+                    mm_for_event = (
+                        list(action.multimodality) if action.multimodality is not None else None
+                    )
+                    with self._rec.record(
+                        current_batch+1,
+                        action_id,
+                        "ALL_REDUCE",
+                        stage_idx,
+                        -1,
+                        multimodality=mm_for_event,
+                    ):  # -1 not specific microbatch
                         stage._execute_allreduce()
                                 
                 else:

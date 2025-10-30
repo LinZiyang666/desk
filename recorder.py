@@ -21,6 +21,7 @@ class TraceEvent:
     chunk:      Optional[int] = None
     # 新增：执行状态（completed / error:...）
     status:     str = "completed"
+    multimodality: Optional[List[str]] = None
     # (ts_ns, up_mbps, down_mbps)
     
 
@@ -63,7 +64,15 @@ class Recorder:
         self.enabled = flag
 
     @contextmanager
-    def record(self, batch_id: int, action_id: int,action: str, stage_idx: int, mb_idx: int):
+    def record(
+        self,
+        batch_id: int,
+        action_id: int,
+        action: str,
+        stage_idx: int,
+        mb_idx: int,
+        multimodality: Optional[List[str]] = None,
+    ):
         if not self.enabled:
             yield
             return
@@ -114,6 +123,7 @@ class Recorder:
                     start_ns, end_ns,
                     chunk=None,
                     status="completed",
+                    multimodality=multimodality,
                     net_series=samples,
                 )
             )
@@ -130,6 +140,7 @@ class Recorder:
         start_ns: int,
         poll_interval: float = 0.001,
         chunk_idx: Optional[int] = None,
+        multimodality: Optional[List[str]] = None,
     ):
         if not self.enabled:
             return
@@ -148,6 +159,7 @@ class Recorder:
                     start_ns, start_ns,  # Use start time as end time for now
                     chunk=chunk_idx,
                     status="posted",  
+                    multimodality=multimodality,
                     net_series=[],
                 )
             )
@@ -199,6 +211,7 @@ class Recorder:
                         start_ns, end_ns,
                         chunk=chunk_idx,
                         status=status,
+                        multimodality=multimodality,
                         net_series=samples,
                     )
                 )
