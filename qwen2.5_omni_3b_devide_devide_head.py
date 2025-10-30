@@ -300,42 +300,6 @@ class AudioEncoderMidFive(nn.Module):
 #             pass
 #         return out
 
-
-def _infer_vision_pad_lengths(enc: nn.Module) -> tuple[int, int]:
-    """
-    根据视觉编码器配置推断在流水线上需要对序列长度和 cu_window_seqlens 统一到的最大值。
-    这样即便不同 microbatch 的视觉 patch 数量不同，也能保证 pipeline 的形状校验通过。
-    """
-    config = getattr(enc, "config", None)
-    window_size = getattr(config, "window_size", getattr(enc, "window_size", 112))
-    spatial_merge_size = getattr(config, "spatial_merge_size", getattr(enc, "spatial_merge_size", 1))
-    try:
-        base_grid = max(1, int(window_size) // int(spatial_merge_size))
-        base_area = base_grid * base_grid
-    except Exception:
-        base_area = 4096  # fallback
-
-    temporal_hint = None
-    if config is not None:
-        for attr in ("max_temporal_patch", "max_temporal_length", "max_frames", "video_frames", "temporal_patch_size"):
-            temporal_hint = getattr(config, attr, None)
-            if temporal_hint is not None:
-                break
-    if temporal_hint is None:
-        temporal_hint = 1
-    try:
-        temporal_hint = max(1, int(temporal_hint))
-    except Exception:
-        temporal_hint = 1
-
-    pad_seq_len = base_area * temporal_hint
-    pad_seq_len = max(pad_seq_len, 4096)  # 至少 4k token，覆盖常见场景
-
-    spatial_merge_unit = getattr(enc, "spatial_merge_unit", 1)
-    pad_window_len = max(4, (pad_seq_len // max(1, spatial_merge_unit)) + 4)
-
-    return int(pad_seq_len), int(pad_window_len)
-
 class VisionFrontAndTwoLayers(nn.Module):
     """
     Stage-A (Vision):
@@ -359,13 +323,6 @@ class VisionFrontAndTwoLayers(nn.Module):
         self.blocks = nn.ModuleList([enc.blocks[i] for i in range(take)])
         self.offset = take
         self.use_checkpoint = use_checkpoint
-        pad_seq_len, pad_window_len = _infer_vision_pad_lengths(enc)
-        if not hasattr(enc, "_pad_seq_len_hint"):
-            enc._pad_seq_len_hint = pad_seq_len
-        if not hasattr(enc, "_pad_window_len_hint"):
-            enc._pad_window_len_hint = pad_window_len
-        self.pad_seq_len = int(getattr(enc, "_pad_seq_len_hint"))
-        self.pad_window_len = int(getattr(enc, "_pad_window_len_hint"))
 
     @staticmethod
     def _cat_pixel_values(vision_inputs):
@@ -465,33 +422,14 @@ class VisionFrontAndTwoLayers(nn.Module):
             cu_now = cu_seqlens if global_attn else cu_window_seqlens
             hidden_states = self._maybe_ckpt(blk, hidden_states, cu_now, rotary_pos_emb)
 
-        # 统一对齐长度，避免不同 microbatch 触发 pipeline 的形状校验错误
-        seq_len_cur = hidden_states.size(0)
-        if seq_len_cur > self.pad_seq_len:
-            try:
-                rid = dist.get_rank() if dist.is_initialized() else -1
-                print(f"[rank{rid}] VisionFrontAndTwoLayers.forward: seq_len {seq_len_cur} exceeds pad_seq_len {self.pad_seq_len}, truncating to fit pipeline buffers.")
-            except Exception:
-                pass
-            hidden_states = hidden_states[:self.pad_seq_len]
-            seq_len_cur = hidden_states.size(0)
-        elif seq_len_cur < self.pad_seq_len:
-            pad_rows = self.pad_seq_len - seq_len_cur
-            pad_tensor = hidden_states.new_zeros(pad_rows, hidden_states.size(1))
-            hidden_states = torch.cat([hidden_states, pad_tensor], dim=0)
+        try:
+            rid = dist.get_rank() if dist.is_initialized() else -1
+            print(f"[rank{rid}] VisionFrontAndTwoLayers.forward: returning hidden_states_shape={tuple(hidden_states.shape)} cu_window_len={tuple(cu_window_seqlens.shape)} grid_thw_shape={tuple(grid_thw.shape)}")
+        except Exception:
+            pass
 
-        cu_window_tensor = cu_window_seqlens.to(hidden_states.device)
-        dtype_cu = cu_window_tensor.dtype if isinstance(cu_window_tensor, torch.Tensor) else torch.int32
-        if cu_window_tensor.numel() < self.pad_window_len:
-            if cu_window_tensor.numel() == 0:
-                cu_window_tensor = torch.zeros(1, device=hidden_states.device, dtype=dtype_cu)
-            last_val = cu_window_tensor[-1]
-            pad_vals = last_val.expand(self.pad_window_len - cu_window_tensor.numel())
-            cu_window_tensor = torch.cat([cu_window_tensor, pad_vals.to(cu_window_tensor.dtype)], dim=0)
-        elif cu_window_tensor.numel() > self.pad_window_len:
-            cu_window_tensor = cu_window_tensor[:self.pad_window_len]
-
-        return hidden_states.contiguous(), cu_window_tensor.contiguous(), grid_thw.contiguous()
+        # 输出三元组，供 Stage-B 继续使用（保持与音频拆段接口风格一致）
+        return hidden_states.contiguous(), cu_window_seqlens.contiguous(), grid_thw.contiguous()
 
 
 class VisionEncoderMidRest(nn.Module):
@@ -513,13 +451,6 @@ class VisionEncoderMidRest(nn.Module):
         self.blocks = nn.ModuleList([enc.blocks[i] for i in range(self.offset, len(enc.blocks))])
         self.merger = enc.merger
         self.use_checkpoint = use_checkpoint
-        pad_seq_len, pad_window_len = _infer_vision_pad_lengths(enc)
-        if not hasattr(enc, "_pad_seq_len_hint"):
-            enc._pad_seq_len_hint = pad_seq_len
-        if not hasattr(enc, "_pad_window_len_hint"):
-            enc._pad_window_len_hint = pad_window_len
-        self.pad_seq_len = int(getattr(enc, "_pad_seq_len_hint"))
-        self.pad_window_len = int(getattr(enc, "_pad_window_len_hint"))
 
     def _maybe_ckpt(self, layer: nn.Module, hidden_states: torch.Tensor,
                     cu_seqlens: torch.Tensor, rotary_pos_emb: torch.Tensor) -> torch.Tensor:
@@ -530,107 +461,69 @@ class VisionEncoderMidRest(nn.Module):
 
     def forward(self, hidden_states, cu_window_seqlens, grid_thw):
         if hidden_states is None or cu_window_seqlens is None or grid_thw is None:
+            # 无视觉输入时保持透传 None，兼容旧逻辑
             return hidden_states, cu_window_seqlens, grid_thw
-
+        if (
+            (torch.is_tensor(hidden_states) and hidden_states.numel() == 0)
+            or (torch.is_tensor(cu_window_seqlens) and cu_window_seqlens.numel() == 0)
+            or (torch.is_tensor(grid_thw) and grid_thw.numel() == 0)
+        ):
+            try:
+                rid = dist.get_rank() if dist.is_initialized() else -1
+                print(f"[rank{rid}] VisionEncoderMidRest.forward: received empty tensors; bypassing vision path")
+            except Exception:
+                pass
+            return None, None, None
         if torch.is_tensor(grid_thw) and torch.all(grid_thw == 0):
-            # 纯占位场景：shape inference 期间会传入 0，占位即可
+            # 形状推理阶段会传入全零 grid_thw；构造一个占位输出，保持与真实前向一致的维度
             if torch.is_tensor(hidden_states):
-                hs = hidden_states
-                if hs.size(0) >= self.pad_seq_len:
-                    hs = hs[: self.pad_seq_len]
-                else:
-                    pad_rows = self.pad_seq_len - hs.size(0)
-                    hs = torch.cat([hs, hs.new_zeros(pad_rows, hs.size(1))], dim=0)
-                padded_hidden = hs.contiguous()
-            else:
-                padded_hidden = hidden_states
-
+                out_dim = getattr(self.merger.mlp[-1], "out_features", hidden_states.size(-1))
+                hidden_states = hidden_states.new_zeros(hidden_states.size(0), out_dim).contiguous()
             if torch.is_tensor(cu_window_seqlens):
-                cu = cu_window_seqlens
-                if cu.numel() >= self.pad_window_len:
-                    cu = cu[: self.pad_window_len]
-                else:
-                    last_val = cu[-1] if cu.numel() > 0 else cu.new_tensor(0)
-                    pad_vals = last_val.expand(self.pad_window_len - cu.numel())
-                    cu = torch.cat([cu, pad_vals.to(cu.dtype)], dim=0)
-                padded_cu = cu.contiguous()
-            else:
-                padded_cu = cu_window_seqlens
-
-            return padded_hidden, padded_cu, grid_thw
-
-        if not torch.is_tensor(hidden_states) or not torch.is_tensor(grid_thw):
-            raise RuntimeError("VisionEncoderMidRest expects tensor inputs.")
-
-        grid_thw = grid_thw.to(hidden_states.device, dtype=torch.long)
-
-        actual_tokens = int((grid_thw[:, 0] * grid_thw[:, 1] * grid_thw[:, 2]).sum().item())
-        if actual_tokens <= 0:
-            return None, None, grid_thw
+                cu_window_seqlens = cu_window_seqlens.contiguous()
+            return hidden_states, cu_window_seqlens, grid_thw
 
         debug_cnt = getattr(self, "_debug_cnt", 0)
         if debug_cnt < 4:
             try:
                 rid = dist.get_rank() if dist.is_initialized() else -1
                 grid_info = grid_thw.tolist() if grid_thw.numel() <= 12 else grid_thw[:min(4, grid_thw.size(0))].tolist()
-                print(f"[rank{rid}] VisionEncoderMidRest.forward (debug): hidden_states_shape={tuple(hidden_states.shape)} actual_tokens={actual_tokens} grid_thw_shape={tuple(grid_thw.shape)} grid_sample={grid_info}")
+                print(f"[rank{rid}] VisionEncoderMidRest.forward (debug): hidden_states_shape={tuple(hidden_states.shape)} cu_window_len={tuple(cu_window_seqlens.shape)} grid_thw_shape={tuple(grid_thw.shape)} grid_sample={grid_info}")
             except Exception:
                 pass
             self._debug_cnt = debug_cnt + 1
 
-        # 提取真实长度部分进行计算
-        hidden_states = hidden_states[:actual_tokens].contiguous()
-
-        # 重新计算窗口索引与 cu_window_seqlens，保证与真实 patch 对齐
+        # 1) 为剩余层计算 RoPE；重排 pos_emb 以与 Stage-A 输出的 hidden_states 顺序一致
         rotary_pos_emb = self.enc.rot_pos_emb(grid_thw)
-        window_index, cu_window_list = self.enc.get_window_index(grid_thw)
-        cu_window_tensor = torch.tensor(
-            cu_window_list,
-            device=hidden_states.device,
-            dtype=grid_thw.dtype if torch.jit.is_tracing() else torch.int32,
-        )
-        cu_window_tensor = torch.unique_consecutive(cu_window_tensor)
-
+        window_index, _ = self.enc.get_window_index(grid_thw)
         seq_len, _ = hidden_states.size()
         s2 = self.spatial_merge_unit
         rotary_pos_emb = rotary_pos_emb.reshape(seq_len // s2, s2, -1)[window_index, :, :].reshape(seq_len, -1)
 
+        # 2) 全局 seqlens（供全局注意力层使用）
         cu_seqlens = torch.repeat_interleave(grid_thw[:, 1] * grid_thw[:, 2], grid_thw[:, 0]).cumsum(
             dim=0, dtype=grid_thw.dtype if torch.jit.is_tracing() else torch.int32
         )
         cu_seqlens = F.pad(cu_seqlens, (1, 0), value=0)
 
+        # 3) 依次通过剩余层（注意：global 层索引 = 本地 layer_idx + offset）
         for local_idx, blk in enumerate(self.blocks):
             global_attn = ((local_idx + self.offset) in self.fullatt_block_indexes)
-            cu_now = cu_seqlens if global_attn else cu_window_tensor
+            cu_now = cu_seqlens if global_attn else cu_window_seqlens
             hidden_states = self._maybe_ckpt(blk, hidden_states, cu_now, rotary_pos_emb)
 
+        # 4) merger + 逆序恢复
         hidden_states = self.merger(hidden_states)
+        try:
+            rid = dist.get_rank() if dist.is_initialized() else -1
+            print(f"[rank{rid}] VisionEncoderMidRest.forward: after merger shape={tuple(hidden_states.shape)}")
+        except Exception:
+            pass
         reverse_indices = torch.argsort(window_index)
         hidden_states = hidden_states[reverse_indices, :]
 
-        # Pad/截断到统一长度，保证 pipeline 形状一致
-        seq_len_cur = hidden_states.size(0)
-        if seq_len_cur > self.pad_seq_len:
-            try:
-                rid = dist.get_rank() if dist.is_initialized() else -1
-                print(f"[rank{rid}] VisionEncoderMidRest.forward: seq_len {seq_len_cur} exceeds pad_seq_len {self.pad_seq_len}, truncating.")
-            except Exception:
-                pass
-            hidden_states = hidden_states[: self.pad_seq_len]
-        elif seq_len_cur < self.pad_seq_len:
-            pad_rows = self.pad_seq_len - seq_len_cur
-            pad_tensor = hidden_states.new_zeros(pad_rows, hidden_states.size(1))
-            hidden_states = torch.cat([hidden_states, pad_tensor], dim=0)
-
-        if cu_window_tensor.numel() < self.pad_window_len:
-            last_val = cu_window_tensor[-1] if cu_window_tensor.numel() > 0 else cu_window_tensor.new_tensor(0)
-            pad_vals = last_val.expand(self.pad_window_len - cu_window_tensor.numel())
-            cu_window_tensor = torch.cat([cu_window_tensor, pad_vals.to(cu_window_tensor.dtype)], dim=0)
-        elif cu_window_tensor.numel() > self.pad_window_len:
-            cu_window_tensor = cu_window_tensor[: self.pad_window_len]
-
-        return hidden_states.contiguous(), cu_window_tensor.contiguous(), grid_thw.contiguous()
+        # 与音频拆段风格统一，返回三元组（后两项透传）
+        return hidden_states.contiguous(), cu_window_seqlens.contiguous(), grid_thw.contiguous()
 
 
 
