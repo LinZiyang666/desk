@@ -1307,6 +1307,14 @@ def main():
     vision_enc   = getattr(thinker, "visual", None)
     rotary_emb   = getattr(text_model, "rotary_emb", None)
     vocab_size   = tok.vocab_size
+    if rank == 0 and vision_enc is not None and getattr(vision_enc, "config", None) is not None:
+        cfg = vision_enc.config
+        try:
+            keys = [k for k in dir(cfg) if not k.startswith("_") and not callable(getattr(cfg, k))]
+            summary = {k: getattr(cfg, k) for k in keys if isinstance(getattr(cfg, k), (int, float, tuple, list))}
+            print(f"[rank0] vision config summary: {summary}")
+        except Exception:
+            pass
 
     # 自动切分点
     L  = len(text_model.layers)
