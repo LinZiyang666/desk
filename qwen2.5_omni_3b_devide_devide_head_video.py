@@ -1052,7 +1052,9 @@ class TextAndVideoFrontAndTwoLayers(nn.Module):
         vid_cu_window_seqlens: torch.Tensor
         video_grid_thw: torch.Tensor
         if isinstance(video_inputs, dict):
-            pixel_values = video_inputs.get("pixel_values_videos") or video_inputs.get("pixel_values")
+            pixel_values = video_inputs.get("pixel_values_videos")
+            if pixel_values is None:
+                pixel_values = video_inputs.get("pixel_values")
             if isinstance(pixel_values, torch.Tensor):
                 try:
                     rid = dist.get_rank() if dist.is_initialized() else -1
