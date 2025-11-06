@@ -1021,9 +1021,14 @@ class TextAndVideoFrontAndTwoLayers(nn.Module):
         device = input_ids.device
         try:
             rid = dist.get_rank() if dist.is_initialized() else -1
-            vk = sorted(list(video_inputs.keys())) if isinstance(video_inputs, dict) else None
-            print(f"[rank{rid}] TextAndVideoFront.forward: input_ids={tuple(input_ids.shape)} attention_mask={tuple(attention_mask.shape) if isinstance(attention_mask, torch.Tensor) else None} "
-                  f"video_keys={vk}")
+            if isinstance(video_inputs, dict):
+                vk = sorted(list(video_inputs.keys()))
+                pv = video_inputs.get("pixel_values_videos") or video_inputs.get("pixel_values")
+                pv_shape = tuple(pv.shape) if isinstance(pv, torch.Tensor) else None
+                print(f"[rank{rid}] TextAndVideoFront.forward: input_ids={tuple(input_ids.shape)} attention_mask={tuple(attention_mask.shape) if isinstance(attention_mask, torch.Tensor) else None} "
+                      f"video_keys={vk} pixel_values_shape={pv_shape}")
+            else:
+                print(f"[rank{rid}] TextAndVideoFront.forward: video_inputs type={type(video_inputs).__name__}")
         except Exception:
             pass
         # 文本 head 与你原 TextStage 一致
@@ -1048,7 +1053,20 @@ class TextAndVideoFrontAndTwoLayers(nn.Module):
         video_grid_thw: torch.Tensor
         if isinstance(video_inputs, dict):
             pixel_values = video_inputs.get("pixel_values_videos") or video_inputs.get("pixel_values")
+            if isinstance(pixel_values, torch.Tensor):
+                try:
+                    rid = dist.get_rank() if dist.is_initialized() else -1
+                    print(
+                        f"[rank{rid}] TextAndVideoFront.forward: pixel_values shape={tuple(pixel_values.shape)}"
+                    )
+                except Exception:
+                    pass
             if isinstance(pixel_values, torch.Tensor) and pixel_values.numel() > 0:
+                try:
+                    rid = dist.get_rank() if dist.is_initialized() else -1
+                    print(f"[rank{rid}] TextAndVideoFront.forward: invoking vision_front")
+                except Exception:
+                    pass
                 vh, vc, vg = self.vision_front(video_inputs)
             try:
                 rid = dist.get_rank() if dist.is_initialized() else -1
@@ -2366,7 +2384,6 @@ def main():
                 buf_vid = [None]
                 dist.broadcast_object_list(buf_vid, src=0)
                 video_pack = buf_vid[0]
-                video_pack = _replicate_video_pack_for_microbatches(video_pack, microbatch_num)
                 buf_vis = [None]
                 dist.broadcast_object_list(buf_vis, src=0)
                 vis_pack = buf_vis[0]
