@@ -1609,12 +1609,10 @@ def main():
     elif rank == 8:
         stage_mod = TextAndVideoEncoderMidRest(VisionEncoderMidRest(vision_enc))
         stage_mod.to(device)
-        stage = PipelineStage_Multimodality(stage_mod, stage_index=0,
+        stage = PipelineStage_with_mutiple_ranks(stage_mod, stage_index=0,
                             num_stages=world, device=device,
                             group=dist.group.WORLD,
-                            prev_group=[2], this_group=[8], next_group=[3],
-                            model_type = "text",
-                            mm_prev_groups = None)
+                            prev_group=[2], this_group=[8], next_group=[3])
         setattr(stage, "modal_type", "text")
         
     elif rank == 3:
