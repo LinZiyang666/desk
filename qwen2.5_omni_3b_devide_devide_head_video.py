@@ -10,8 +10,21 @@ from tqdm import tqdm
 # Helper to load local ./video.mp4 once and convert to processor-ready video pack
 def _load_video_pack(proc, path, vision_module, max_tubelets=16):
     print(f"[video_loader] cwd={os.getcwd()} trying processor on path={path}")
+    # Prefer the dedicated video processor if available; otherwise fall back to the generic AutoProcessor.
+    video_proc = getattr(proc, "video_processor", None) or getattr(proc, "vision_processor", None)
+    use_auto = video_proc is None
+    if use_auto:
+        video_proc = proc
+
+    def _run_processor(video_input):
+        kwargs = {"videos": [video_input], "return_tensors": "pt"}
+        if use_auto:
+            # AutoProcessor main API expects a companion text input; supply empty prompt.
+            kwargs.setdefault("text", [""])
+        return video_proc(**kwargs)
+
     try:
-        batch = proc(videos=[path], return_tensors="pt")
+        batch = _run_processor(path)
         pv = batch.get("pixel_values_videos", None)
         vthw = batch.get("video_grid_thw", None)
         print(f"[video_loader] processor returned pv={None if pv is None else tuple(pv.shape)} grid={None if vthw is None else tuple(vthw.shape)}")
@@ -34,7 +47,7 @@ def _load_video_pack(proc, path, vision_module, max_tubelets=16):
         vframes, _, _ = read_video(path, pts_unit="sec")  # [T,H,W,3] uint8
         print(f"[video_loader] read_video frames shape={tuple(vframes.shape)}")
         frame_list = [f.cpu().numpy() for f in vframes]   # list of HWC uint8
-        batch = proc(videos=[frame_list], return_tensors="pt")
+        batch = _run_processor(frame_list)
         pv = batch.get("pixel_values_videos", None)
         vthw = batch.get("video_grid_thw", None)
         print(f"[video_loader] fallback processor returned pv={None if pv is None else tuple(pv.shape)} grid={None if vthw is None else tuple(vthw.shape)}")
