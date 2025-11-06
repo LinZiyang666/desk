@@ -1437,8 +1437,7 @@ class PipelineStage_Multimodality(PipelineStage_with_mutiple_ranks):
 
         # 计划：每个 info 分配一个“整块 flat 缓冲”，分片 irecv 到其相应窄视图
         plans = []  # [(slot_idx, tmp_full_flat, slices, peer_global_rank, shape, dtype, device)]
-        slot_ctr = 0
-        for info in recv_infos:
+        for slot_idx, info in enumerate(recv_infos):
             if not isinstance(info, _RecvInfo):
                 continue
             buf = info.buffer
@@ -1651,8 +1650,7 @@ class PipelineStage_Multimodality(PipelineStage_with_mutiple_ranks):
             return []
 
         plans = []  # [(slot_idx, tmp_full_flat, slices, peer_global_rank, shape, dtype, device)]
-        slot_ctr = 0
-        for info in recv_infos:
+        for slot_idx, info in enumerate(recv_infos):
             if not isinstance(info, _RecvInfo):
                 continue
             buf = info.buffer
@@ -1672,9 +1670,8 @@ class PipelineStage_Multimodality(PipelineStage_with_mutiple_ranks):
                 peer_rank = self._recv_peer_from_info(info, (src_rank_fallback if src_rank_fallback is not None else 0))
                 peer_global_rank = self._peer_global_rank(peer_rank)
 
-            plans.append((slot_ctr, tmp_full_flat, slices, peer_global_rank, shape, dtype, device))
+            plans.append((slot_idx, tmp_full_flat, slices, peer_global_rank, shape, dtype, device))
             self._mm_bwd_post_recv[(bwd_chunk_id, modality)].append((tmp_full_flat, shape, dtype, device))
-            slot_ctr += 1
 
         ops: list[dist.P2POp] = []
         ops_per_chunk: list[int] = [0 for _ in range(max(1, num_splits))]
