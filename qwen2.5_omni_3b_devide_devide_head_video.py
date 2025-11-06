@@ -1136,67 +1136,258 @@ class TextAndVideoEncoderMidRest(nn.Module):
 # 3 若传入 video_outputs 则依据 video_token_id 将其按位替换到 hidden 中
 # =====================
 class Stage1(nn.Module):
-    def __init__(self, text_model: nn.Module, L1: int, vision_encoder_for_video: Optional[nn.Module] = None):
+    def __init__(self, text_model, L1):
         super().__init__()
         self.layers = nn.ModuleList(text_model.layers[:L1])
         self.rotary_emb = text_model.rotary_emb
         self.get_rope_index = getattr(text_model, "get_rope_index", None)
+
         cfg = getattr(text_model, "config", None)
         self.image_token_id = getattr(cfg, "image_token_id", None)
         self.audio_token_id = getattr(cfg, "audio_token_id", None)
         self.video_token_id = getattr(cfg, "video_token_id", None)
-        # 兼容旧用法 若外部想在本层内完成视频后段 可传入 VisionEncoderMidRest 实例
-        self.video_midrest = vision_encoder_for_video
 
     @staticmethod
     def _adapt_feats_to_hidden(feats: torch.Tensor, hidden_dim: int) -> torch.Tensor:
+        """将任意形状 [..., D] 的特征适配为 [N, hidden_dim]。"""
         if feats is None:
-            return None
-        if feats.dim() == 2:
             return feats
-        return feats.reshape(-1, feats.shape[-1])
+        if feats.dim() == 3:
+            feats = feats.reshape(-1, feats.size(-1))
+        elif feats.dim() != 2:
+            feats = feats.reshape(-1, feats.size(-1))
 
-    def _inject_mm(self, hidden, input_ids, token_id, mm_embeds):
-        if mm_embeds is None or token_id is None:
-            return hidden
-        mm_embeds = self._adapt_feats_to_hidden(mm_embeds, hidden.size(-1))
-        mask = (input_ids == token_id).reshape(-1)
-        if mask.sum().item() == 0:
-            return hidden
-        hidden = hidden.reshape(-1, hidden.size(-1))
-        hidden[mask] = mm_embeds[: int(mask.sum().item())]
-        return hidden.view_as(hidden)
+        D = feats.size(-1)
+        if D == hidden_dim:
+            return feats
+        if D < hidden_dim:
+            pad = torch.zeros(feats.size(0), hidden_dim - D, device=feats.device, dtype=feats.dtype)
+            return torch.cat([feats, pad], dim=-1)
+        return feats[:, :hidden_dim]
+
+    @staticmethod
+    def _infer_token_id_by_count(input_ids: torch.Tensor, expected_count: int, prefer_large_id: bool = True) -> Optional[int]:
+        if input_ids is None or expected_count <= 0:
+            return None
+        ids = input_ids.reshape(-1)
+        uniq, cnt = torch.unique(ids, return_counts=True)
+        mask = cnt == expected_count
+        cand = uniq[mask]
+        if cand.numel() == 0:
+            return None
+        if cand.numel() == 1:
+            return int(cand.item())
+        return int(torch.max(cand).item()) if prefer_large_id else int(torch.min(cand).item())
+
+    @staticmethod
+    def _infer_token_id_by_longest_run(input_ids: torch.Tensor) -> tuple[Optional[int], int]:
+        if (
+            input_ids is None
+            or not isinstance(input_ids, torch.Tensor)
+            or input_ids.dim() != 2
+            or input_ids.numel() == 0
+        ):
+            return None, 0
+        ids = input_ids[0].detach()
+        best_id = None
+        best_len = 0
+        cur_id = None
+        cur_len = 0
+        for v in ids:
+            v = int(v.item())
+            if cur_id is None or v != cur_id:
+                if cur_len > best_len:
+                    best_id, best_len = cur_id, cur_len
+                cur_id, cur_len = v, 1
+            else:
+                cur_len += 1
+        if cur_len > best_len:
+            best_id, best_len = cur_id, cur_len
+        return best_id, best_len
+
+    @staticmethod
+    def _align_feats_length(feats: torch.Tensor, target_len: int) -> torch.Tensor:
+        if feats is None:
+            return feats
+        N = feats.size(0)
+        if N == target_len:
+            return feats
+        if N > target_len:
+            return feats[:target_len]
+        if N == 0:
+            return torch.zeros(target_len, feats.size(1), device=feats.device, dtype=feats.dtype)
+        pad_count = target_len - N
+        last_vec = feats[-1:].expand(pad_count, -1)
+        return torch.cat([feats, last_vec], dim=0)
+
+    @staticmethod
+    def _replace_feats_by_token_id(input_ids, inputs_embeds, feats, special_token_id):
+        if feats is None or special_token_id is None or input_ids is None:
+            try:
+                rid = dist.get_rank() if dist.is_initialized() else -1
+                print(f"[rank{rid}] Stage1._replace_feats_by_token_id: skip replacement token_id={special_token_id} feats={(None if feats is None else tuple(feats.shape))}")
+            except Exception:
+                pass
+            return inputs_embeds
+
+        flat_mask = (input_ids == special_token_id).reshape(-1)
+        n_tokens = int(flat_mask.sum().item())
+        if n_tokens == 0:
+            try:
+                rid = dist.get_rank() if dist.is_initialized() else -1
+                print(f"[rank{rid}] Stage1._replace_feats_by_token_id: no tokens for token_id={special_token_id}")
+            except Exception:
+                pass
+            return inputs_embeds
+
+        if feats.size(0) != n_tokens:
+            raise RuntimeError(
+                f"Feature count mismatch for token_id={special_token_id}: tokens={n_tokens} vs feats={feats.size(0)}"
+            )
+
+        emb_flat = inputs_embeds.reshape(-1, inputs_embeds.size(-1))
+        feats = feats.to(device=emb_flat.device, dtype=emb_flat.dtype)
+        idx = torch.nonzero(flat_mask, as_tuple=False).squeeze(1).to(dtype=torch.long)
+        idx2 = idx.unsqueeze(1).expand(-1, emb_flat.size(1))
+        out_flat = emb_flat.scatter(0, idx2, feats)
+        try:
+            rid = dist.get_rank() if dist.is_initialized() else -1
+            print(f"[rank{rid}] Stage1._replace_feats_by_token_id: replaced token_id={special_token_id} count={n_tokens}")
+        except Exception:
+            pass
+        return out_flat.view_as(inputs_embeds)
 
     def forward(self, *args, **kwargs):
-        # 原有三元组
         if len(args) >= 3:
             hidden, attn_mask, position_ids = args[:3]
         else:
             hidden = kwargs["hidden"]
             attn_mask = kwargs["attn_mask"]
             position_ids = kwargs.get("position_ids", None)
+
         input_ids = kwargs.get("input_ids", None)
         attention_mask_2d = kwargs.get("attention_mask_2d", None)
         grid_thw = kwargs.get("grid_thw", None)
+
         image_embeds = kwargs.get("image_embeds", None)
         audio_embeds = kwargs.get("audio_embeds", None)
-        # 新增视频通路
         video_outputs = kwargs.get("video_outputs", None)
-        video_embeds = None
+        video_front = kwargs.get("video_front", None)
+        video_embeds = kwargs.get("video_embeds", None)
+
+        image_token_id = kwargs.get("image_token_id", self.image_token_id)
+        audio_token_id = kwargs.get("audio_token_id", self.audio_token_id)
+        video_token_id = kwargs.get("video_token_id", self.video_token_id)
+
         if isinstance(video_outputs, dict):
-            video_embeds = video_outputs.get("video_embeds", None)
+            video_embeds = video_outputs.get("video_embeds", video_embeds)
             if grid_thw is None:
-                grid_thw = video_outputs.get("video_grid_thw", None)
-        # 可选 在本层内完成视频后段
-        if video_embeds is None and self.video_midrest is not None and "video_front" in kwargs:
-            vid_h, vid_cu, vgrid = kwargs["video_front"]
-            vid_h, _, vgrid = self.video_midrest(vid_h, vid_cu, vgrid)
-            video_embeds = vid_h
-            if grid_thw is None:
-                grid_thw = vgrid
-        # 位置编码
-        if position_ids is None and self.get_rope_index is not None and input_ids is not None and attention_mask_2d is not None:
-            position_ids = self.get_rope_index(attention_mask_2d, grid_thw)
+                grid_thw = video_outputs.get("video_grid_thw", grid_thw)
+        if video_embeds is None and video_front is not None:
+            try:
+                rid = dist.get_rank() if dist.is_initialized() else -1
+                print(f"[rank{rid}] Stage1.forward: video_front provided but no decoder available; skip.")
+            except Exception:
+                pass
+
+        try:
+            rid = dist.get_rank() if dist.is_initialized() else -1
+            def _s(x):
+                return tuple(x.shape) if isinstance(x, torch.Tensor) else None
+            img_cnt = aud_cnt = vid_cnt = None
+            if isinstance(input_ids, torch.Tensor):
+                try:
+                    if image_token_id is not None:
+                        img_cnt = int((input_ids == image_token_id).sum().item())
+                    if audio_token_id is not None:
+                        aud_cnt = int((input_ids == audio_token_id).sum().item())
+                    if video_token_id is not None:
+                        vid_cnt = int((input_ids == video_token_id).sum().item())
+                except Exception:
+                    pass
+            print(
+                f"[rank{rid}] Stage1.forward: input_ids={_s(input_ids)} attention_mask_2d={_s(attention_mask_2d)} grid_thw={_s(grid_thw)} "
+                f"image_embeds={_s(image_embeds)} audio_embeds={_s(audio_embeds)} video_embeds={_s(video_embeds)} "
+                f"token_ids(img,aud,vid)=({image_token_id},{audio_token_id},{video_token_id}) "
+                f"counts(img,aud,vid)=({img_cnt},{aud_cnt},{vid_cnt})"
+            )
+        except Exception:
+            pass
+
+        if input_ids is not None:
+            H = hidden.size(-1)
+
+            if image_embeds is not None:
+                img_feats = self._adapt_feats_to_hidden(image_embeds, H)
+                if image_token_id is None:
+                    image_token_id = self._infer_token_id_by_count(input_ids, img_feats.size(0))
+                if image_token_id is None:
+                    run_id, run_len = self._infer_token_id_by_longest_run(input_ids)
+                    if run_id is not None and run_len > 0:
+                        image_token_id = run_id
+                        img_feats = self._align_feats_length(img_feats, run_len)
+                if image_token_id is not None:
+                    flat_mask = (input_ids == image_token_id).reshape(-1)
+                    n_tokens = int(flat_mask.sum().item())
+                    if img_feats.size(0) != n_tokens:
+                        img_feats = self._align_feats_length(img_feats, n_tokens)
+                    hidden = self._replace_feats_by_token_id(input_ids, hidden, img_feats, image_token_id)
+
+            if audio_embeds is not None:
+                aud_feats = self._adapt_feats_to_hidden(audio_embeds, H)
+                if audio_token_id is None:
+                    audio_token_id = self._infer_token_id_by_count(input_ids, aud_feats.size(0))
+                if audio_token_id is None:
+                    run_id, run_len = self._infer_token_id_by_longest_run(input_ids)
+                    if run_id is not None and run_len > 0:
+                        audio_token_id = run_id
+                        aud_feats = self._align_feats_length(aud_feats, run_len)
+                if audio_token_id is not None:
+                    flat_mask = (input_ids == audio_token_id).reshape(-1)
+                    n_tokens = int(flat_mask.sum().item())
+                    if aud_feats.size(0) != n_tokens:
+                        aud_feats = self._align_feats_length(aud_feats, n_tokens)
+                    hidden = self._replace_feats_by_token_id(input_ids, hidden, aud_feats, audio_token_id)
+
+            if video_embeds is not None:
+                vid_feats = self._adapt_feats_to_hidden(video_embeds, H)
+                if video_token_id is None:
+                    video_token_id = self._infer_token_id_by_count(input_ids, vid_feats.size(0))
+                if video_token_id is None:
+                    run_id, run_len = self._infer_token_id_by_longest_run(input_ids)
+                    if run_id is not None and run_len > 0:
+                        video_token_id = run_id
+                        vid_feats = self._align_feats_length(vid_feats, run_len)
+                if video_token_id is not None:
+                    flat_mask = (input_ids == video_token_id).reshape(-1)
+                    n_tokens = int(flat_mask.sum().item())
+                    if vid_feats.size(0) != n_tokens:
+                        vid_feats = self._align_feats_length(vid_feats, n_tokens)
+                    hidden = self._replace_feats_by_token_id(input_ids, hidden, vid_feats, video_token_id)
+
+        else:
+            try:
+                rid = dist.get_rank() if dist.is_initialized() else -1
+                print(f"[rank{rid}] Stage1.forward: input_ids is None; skip multimodal injection")
+            except Exception:
+                pass
+
+        if position_ids is None:
+            if self.get_rope_index is not None and input_ids is not None and attention_mask_2d is not None:
+                position_ids, _ = self.get_rope_index(
+                    input_ids,
+                    image_grid_thw=grid_thw,
+                    video_grid_thw=None,
+                    attention_mask=attention_mask_2d,
+                )
+            else:
+                B, T, _ = hidden.shape
+                base_pos = torch.arange(T, device=hidden.device).unsqueeze(0).repeat(B, 1)
+                position_ids = torch.stack([base_pos, base_pos, base_pos], dim=0).contiguous()
+
+        if position_ids.dim() == 2:
+            position_ids = position_ids.unsqueeze(0).repeat(3, 1, 1)
+
         pos_emb = self.rotary_emb(hidden, position_ids)
         for blk in self.layers:
             hidden = blk(
@@ -1207,11 +1398,7 @@ class Stage1(nn.Module):
                 output_attentions=False,
                 use_cache=False,
             )[0]
-        # 多模态注入
-        if input_ids is not None:
-            hidden = self._inject_mm(hidden, input_ids, self.image_token_id, image_embeds)
-            hidden = self._inject_mm(hidden, input_ids, self.audio_token_id, audio_embeds)
-            hidden = self._inject_mm(hidden, input_ids, self.video_token_id, video_embeds)
+
         return hidden.contiguous(), attn_mask.contiguous(), position_ids.contiguous()
 
 class Stage2(nn.Module):
