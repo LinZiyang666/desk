@@ -541,6 +541,10 @@ def _cat_like(items: list[Any]) -> Any:
 
 # Safely split the tensor into n parts in the batch dimension; If the number of blocks is less than n, the last block is copied to make up for it
 def _safe_chunk(t: torch.Tensor, n: int) -> List[torch.Tensor]:
+    if t.size(0) == 0:
+        # 当张量在 batch 维度为空时，torch.chunk 无法工作；改为复制空张量占位
+        return [t.clone() for _ in range(n)]
+
     chunks = list(torch.chunk(t, min(n, t.size(0)), dim=0))
     if len(chunks) < n:
         pad = chunks[-1].detach().clone()
