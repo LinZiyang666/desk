@@ -1810,25 +1810,58 @@ class PipelineStage_Multimodality(PipelineStage_with_mutiple_ranks):
             return isinstance(x, torch.Tensor) and (x.dtype in (torch.int64, torch.int32, torch.int16, torch.int8, torch.bool))
 
         def _parse_text_bundle(tensors: tuple[torch.Tensor, ...]):
-            """返回: hidden, attn_4d, position_ids(or None), input_ids(or None), attention_mask_2d(or None)"""
+            """返回: hidden, attn_4d, position_ids, input_ids, attention_mask_2d, video_embeds, video_grid"""
             hidden = attn_4d = pos_ids = inp_ids = attn2d = None
+            video_embeds = None
+            video_grid = None
+
             if not tensors:
-                return hidden, attn_4d, pos_ids, inp_ids, attn2d
-            if len(tensors) >= 1 and _is_float_tensor(tensors[0]): hidden = tensors[0]
-            if len(tensors) >= 2 and _is_float_tensor(tensors[1]): attn_4d = tensors[1]
+                return hidden, attn_4d, pos_ids, inp_ids, attn2d, video_embeds, video_grid
+
+            if len(tensors) >= 1 and _is_float_tensor(tensors[0]):
+                hidden = tensors[0]
+            if len(tensors) >= 2 and _is_float_tensor(tensors[1]):
+                attn_4d = tensors[1]
+
             idx = 2
             if len(tensors) > idx and isinstance(tensors[idx], torch.Tensor) and tensors[idx].dim() in (2, 3):
-                pos_ids = tensors[idx]; idx += 1
+                pos_ids = tensors[idx]
+                idx += 1
+
             B = hidden.shape[0] if isinstance(hidden, torch.Tensor) and hidden.dim() >= 2 else None
             T = hidden.shape[1] if isinstance(hidden, torch.Tensor) and hidden.dim() >= 2 else None
+
+            # 先搜集整型张量（input_ids / attention_mask）
             for j in range(idx, len(tensors)):
                 t = tensors[j]
-                if not isinstance(t, torch.Tensor): continue
-                if _is_int_like_tensor(t) and t.dim() == 2:
-                    if B is not None and T is not None and (t.shape[0] == B and t.shape[1] == T):
-                        if inp_ids is None: inp_ids = t
-                        elif attn2d is None: attn2d = t
-            return hidden, attn_4d, pos_ids, inp_ids, attn2d
+                if not isinstance(t, torch.Tensor):
+                    continue
+                if _is_int_like_tensor(t) and t.dim() == 2 and B is not None and T is not None and t.shape[0] == B and t.shape[1] == T:
+                    if inp_ids is None:
+                        inp_ids = t
+                    elif attn2d is None:
+                        attn2d = t
+
+            # 搜集额外的浮点/网格信息（视频）
+            for j in range(idx, len(tensors)):
+                t = tensors[j]
+                if not isinstance(t, torch.Tensor):
+                    continue
+                if _is_float_tensor(t) and t is not hidden and t is not attn_4d:
+                    if video_embeds is None:
+                        video_embeds = t
+                        continue
+                if isinstance(t, torch.Tensor) and not t.is_floating_point():
+                    if (
+                        video_grid is None
+                        and t is not inp_ids
+                        and t is not attn2d
+                        and t.dim() >= 2
+                        and t.size(-1) == 3
+                    ):
+                        video_grid = t
+
+            return hidden, attn_4d, pos_ids, inp_ids, attn2d, video_embeds, video_grid
 
         def _parse_vision_bundle(tensors: tuple[torch.Tensor, ...]):
             """返回: image_embeds(or None), grid_thw(or None)"""
@@ -1862,23 +1895,12 @@ class PipelineStage_Multimodality(PipelineStage_with_mutiple_ranks):
         audio_tuple  = mm.get("audio",  tuple())
 
 
-        hidden, attn_4d, position_ids, input_ids, attention_mask_2d = _parse_text_bundle(text_tuple)
+        hidden, attn_4d, position_ids, input_ids, attention_mask_2d, video_embeds_extra, video_grid_extra = _parse_text_bundle(text_tuple)
         if hidden is None or attn_4d is None:
             raise RuntimeError(
                 f"[rank{dist.get_rank()}] packing stage missing required text tensors at mb={fwd_chunk_id}: "
                 f"hidden={type(hidden)}, attn_4d={type(attn_4d)}"
             )
-        video_embeds_extra = None
-        video_grid_extra = None
-        if len(text_tuple) >= 6 and isinstance(text_tuple[5], torch.Tensor):
-            candidate = text_tuple[5]
-            if candidate.is_floating_point() and candidate.numel() > 0:
-                video_embeds_extra = candidate
-        if len(text_tuple) >= 7 and isinstance(text_tuple[6], torch.Tensor):
-            grid_candidate = text_tuple[6]
-            if grid_candidate.numel() > 0:
-                video_grid_extra = grid_candidate
-
         image_embeds, grid_thw = _parse_vision_bundle(vision_tuple)
         audio_embeds = _parse_audio_bundle(audio_tuple)
         if grid_thw is None and video_grid_extra is not None:
