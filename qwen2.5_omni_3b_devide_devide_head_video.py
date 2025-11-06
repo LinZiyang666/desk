@@ -9,11 +9,12 @@ from tqdm import tqdm
 
 # Helper to load local ./video.mp4 once and convert to processor-ready video pack
 def _load_video_pack(proc, path, vision_module, max_tubelets=16):
-    print(f"[video_loader] trying processor on path={path}")
+    print(f"[video_loader] cwd={os.getcwd()} trying processor on path={path}")
     try:
         batch = proc(videos=[path], return_tensors="pt")
         pv = batch.get("pixel_values_videos", None)
         vthw = batch.get("video_grid_thw", None)
+        print(f"[video_loader] processor returned pv={None if pv is None else tuple(pv.shape)} grid={None if vthw is None else tuple(vthw.shape)}")
         if pv is not None and vthw is not None and pv.shape[0] >= 1:
             # Optionally clip tubelets to reduce memory
             if max_tubelets is not None and pv.shape[1] > max_tubelets:
@@ -29,11 +30,14 @@ def _load_video_pack(proc, path, vision_module, max_tubelets=16):
     try:
         # Fallback with torchvision if direct path processing is unsupported
         from torchvision.io import read_video
+        print("[video_loader] trying torchvision.read_video fallback")
         vframes, _, _ = read_video(path, pts_unit="sec")  # [T,H,W,3] uint8
+        print(f"[video_loader] read_video frames shape={tuple(vframes.shape)}")
         frame_list = [f.cpu().numpy() for f in vframes]   # list of HWC uint8
         batch = proc(videos=[frame_list], return_tensors="pt")
         pv = batch.get("pixel_values_videos", None)
         vthw = batch.get("video_grid_thw", None)
+        print(f"[video_loader] fallback processor returned pv={None if pv is None else tuple(pv.shape)} grid={None if vthw is None else tuple(vthw.shape)}")
         if pv is not None and vthw is not None:
             if max_tubelets is not None and pv.shape[1] > max_tubelets:
                 batch["pixel_values_videos"] = pv[:, :max_tubelets]
