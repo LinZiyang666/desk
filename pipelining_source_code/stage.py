@@ -38,19 +38,7 @@ _MOD_MASK = (1 << _MOD_BITS) - 1
 
 
 def _mk_tag(direction: int, microbatch_id: int, slot_idx: int, split_idx: int, modality: int = 0) -> int:
-    """Generate 31-bit tag compatible with multimodal stages."""
-    def _debug_print(tag_value: int) -> int:
-        if os.environ.get("TAG_DEBUG", "").lower() in ("1", "true", "yes"):
-            try:
-                rank = dist.get_rank() if dist.is_initialized() else -1
-            except Exception:
-                rank = -1
-            print(
-                f"[tag_debug][rank{rank}] dir={direction} mb={microbatch_id} "
-                f"slot={slot_idx} split={split_idx} mod={modality} -> tag={tag_value}"
-            )
-        return tag_value
-
+    """Generate 31-bit tag compatible with multimodal stages (with verbose logging)."""
     need_fallback = (
         microbatch_id > _MB_MASK
         or slot_idx > _SLOT_MASK
@@ -58,14 +46,22 @@ def _mk_tag(direction: int, microbatch_id: int, slot_idx: int, split_idx: int, m
         or modality > _MOD_MASK
     )
     if not need_fallback:
-        tag = (
+        tag_value = (
             ((modality & _MOD_MASK) << _MOD_SHIFT)
             | ((direction & 1) << _DIR_SHIFT)
             | ((microbatch_id & _MB_MASK) << _MB_SHIFT)
             | ((slot_idx & _SLOT_MASK) << _SLOT_SHIFT)
             | ((split_idx & _SPLIT_MASK) << _SPLIT_SHIFT)
         )
-        return _debug_print(tag)
+        try:
+            rank = dist.get_rank() if dist.is_initialized() else -1
+        except Exception:
+            rank = -1
+        print(
+            f"[tag_debug][rank{rank}] dir={direction} mb={microbatch_id} "
+            f"slot={slot_idx} split={split_idx} mod={modality} -> tag={tag_value}"
+        )
+        return tag_value
 
     v = (direction & 1) << 61
     v ^= (int(modality) & 0x3) << 59
@@ -76,8 +72,16 @@ def _mk_tag(direction: int, microbatch_id: int, slot_idx: int, split_idx: int, m
     v *= 0xFF51AFD7ED558CCD
     v &= (1 << 64) - 1
     v ^= (v >> 33)
-    tag = int(v & 0x7FFFFFFF)
-    return _debug_print(tag)
+    tag_value = int(v & 0x7FFFFFFF)
+    try:
+        rank = dist.get_rank() if dist.is_initialized() else -1
+    except Exception:
+        rank = -1
+    print(
+        f"[tag_debug][rank{rank}] dir={direction} mb={microbatch_id} "
+        f"slot={slot_idx} split={split_idx} mod={modality} -> tag={tag_value}"
+    )
+    return tag_value
 
 
 def _normalize_model_output_as_tuple(output: Any) -> tuple[Any]:
