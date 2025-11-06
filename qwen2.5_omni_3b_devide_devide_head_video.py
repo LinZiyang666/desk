@@ -9,6 +9,7 @@ from tqdm import tqdm
 
 # Helper to load local ./video.mp4 once and convert to processor-ready video pack
 def _load_video_pack(proc, path, vision_module, max_tubelets=16):
+    print(f"[video_loader] trying processor on path={path}")
     try:
         batch = proc(videos=[path], return_tensors="pt")
         pv = batch.get("pixel_values_videos", None)
@@ -24,7 +25,7 @@ def _load_video_pack(proc, path, vision_module, max_tubelets=16):
                 "video_grid_thw": batch["video_grid_thw"],
             }
     except Exception as e:
-        pass
+        print(f"[video_loader] processor path load failed with {type(e).__name__}: {e}")
     try:
         # Fallback with torchvision if direct path processing is unsupported
         from torchvision.io import read_video
@@ -43,7 +44,8 @@ def _load_video_pack(proc, path, vision_module, max_tubelets=16):
                 "video_grid_thw": batch["video_grid_thw"],
             }
     except Exception as e2:
-        pass
+        print(f"[video_loader] torchvision fallback failed with {type(e2).__name__}: {e2}")
+    print("[video_loader] returning empty video pack")
     return {"pixel_values_videos": None, "video_grid_thw": None}
 import time, math
 
@@ -2280,6 +2282,8 @@ def main():
                 # Build video pack from ./video.mp4 once and broadcast
                 if video_pack_cache is None:
                     video_pack_cache = _load_video_pack(proc, "./video.mp4", vision_enc, max_tubelets=16)
+                    if video_pack_cache is None or video_pack_cache.get("pixel_values_videos") is None:
+                        print("[rank0] warning: _load_video_pack returned empty pack")
                     if step < 2:
                         try:
                             pv = video_pack_cache["pixel_values_videos"]
@@ -2292,6 +2296,8 @@ def main():
                 dist.broadcast_object_list(buf_vis, src=0)
                 buf_aud = [aud_pack]
                 dist.broadcast_object_list(buf_aud, src=0)
+                if step < 2:
+                    print(f"[rank0] broadcast video_pack keys={list(video_pack_cache.keys()) if isinstance(video_pack_cache, dict) else None}")
 
                 # Debug first two steps: what will we broadcast for audio
                 if step < 2:
@@ -2341,13 +2347,15 @@ def main():
                             print(f"[rank{rk}] train-step {step}: received aud_pack keys/shapes: {kv}")
                         except Exception:
                             print(f"[rank{rk}] train-step {step}: received aud_pack present but cannot summarize")
-                    if video_pack is not None:
-                        try:
+                    try:
+                        if video_pack is None:
+                            print(f"[rank{rk}] train-step {step}: received video pack=None")
+                        else:
                             pv = video_pack.get("pixel_values_videos", None)
                             vthw = video_pack.get("video_grid_thw", None)
                             print(f"[rank{rk}] train-step {step}: received video pack pv={tuple(pv.shape) if pv is not None else None}, grid={tuple(vthw.shape) if vthw is not None else None}")
-                        except Exception:
-                            print(f"[rank{rk}] train-step {step}: received video pack but cannot summarize")
+                    except Exception as e:
+                        print(f"[rank{rk}] train-step {step}: video pack summarize failed {type(e).__name__}: {e}")
 
                 if rank == 1:
                     # Vision head executes with vision inputs：作为 kwargs 传入，并带上 attention_mask 以便 microbatch 大小推断
