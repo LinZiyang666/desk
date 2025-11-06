@@ -1651,9 +1651,17 @@ class PipelineStage_Multimodality(PipelineStage_with_mutiple_ranks):
         plans = []  # [(slot_idx, tmp_full_flat, slices, peer_global_rank, shape, dtype, device)]
         for slot_idx, info in enumerate(recv_infos):
             if not isinstance(info, _RecvInfo):
+                try:
+                    print(f"[rank{dist.get_rank()}] get_bwd_recv_ops_mm: skip slot={slot_idx} info_type={type(info).__name__}")
+                except Exception:
+                    pass
                 continue
             buf = info.buffer
             if not isinstance(buf, torch.Tensor):
+                try:
+                    print(f"[rank{dist.get_rank()}] get_bwd_recv_ops_mm: skip slot={slot_idx} buffer_type={type(buf).__name__}")
+                except Exception:
+                    pass
                 continue
             shape = tuple(buf.shape)
             dtype = buf.dtype
@@ -1670,6 +1678,10 @@ class PipelineStage_Multimodality(PipelineStage_with_mutiple_ranks):
                 peer_global_rank = self._peer_global_rank(peer_rank)
 
             plans.append((slot_idx, tmp_full_flat, slices, peer_global_rank, shape, dtype, device))
+            try:
+                print(f"[rank{dist.get_rank()}] get_bwd_recv_ops_mm: plan slot={slot_idx} shape={shape} dtype={dtype} peer={peer_global_rank}")
+            except Exception:
+                pass
             self._mm_bwd_post_recv[(bwd_chunk_id, modality)].append((tmp_full_flat, shape, dtype, device))
 
         ops: list[dist.P2POp] = []
