@@ -1715,7 +1715,7 @@ class PipelineStage_Multimodality(PipelineStage_with_mutiple_ranks):
             elif mt == "vision":
                 allow = {"vision_inputs"}
             elif mt == "text":
-                allow = {"input_ids", "attention_mask"}
+                allow = {"input_ids", "attention_mask", "video_inputs", "video_outputs", "video_front"}
 
             # 仅保留允许的键，其余丢弃
             clean_kwargs = None
