@@ -7,6 +7,24 @@ from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 from datasets import load_dataset
 from tqdm import tqdm
 
+import time, math
+
+from stage_with_mutiple_ranks import PipelineStage_with_mutiple_ranks, PipelineStage_Multimodality
+from schedule_runtime import PipelineScheduleRuntimeWithDirection
+from pipelining_source_code.schedules import _Action, _ComputationType
+
+from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.distributed.algorithms.ddp_comm_hooks import default_hooks
+from simple_1F1B_Action import generate_1f1b_pipeline_actions
+from transformers.models.qwen2_5_omni import Qwen2_5OmniThinkerForConditionalGeneration
+
+# ==== 加载 Thinker（Omni-3B，只要文本主干 + 多模态编码器） ====
+from transformers import AutoConfig, AutoTokenizer
+from transformers.models.qwen2_5_omni import Qwen2_5OmniThinkerForConditionalGeneration
+from transformers import AutoProcessor
+from typing import Dict, Any, Optional, Tuple, List
+import torch, torch.nn as nn, torch.nn.functional as F
+
 # Helper to load local ./video.mp4 once and convert to processor-ready video pack
 def _load_video_pack(proc, path, vision_module, max_tubelets=16):
     print(f"[video_loader] cwd={os.getcwd()} trying processor on path={path}")
@@ -81,23 +99,7 @@ def _replicate_video_pack_for_microbatches(video_pack: Optional[Dict[str, torch.
         else:
             replicated[key] = value
     return replicated
-import time, math
 
-from stage_with_mutiple_ranks import PipelineStage_with_mutiple_ranks, PipelineStage_Multimodality
-from schedule_runtime import PipelineScheduleRuntimeWithDirection
-from pipelining_source_code.schedules import _Action, _ComputationType
-
-from torch.nn.parallel import DistributedDataParallel as DDP
-from torch.distributed.algorithms.ddp_comm_hooks import default_hooks
-from simple_1F1B_Action import generate_1f1b_pipeline_actions
-from transformers.models.qwen2_5_omni import Qwen2_5OmniThinkerForConditionalGeneration
-
-# ==== 加载 Thinker（Omni-3B，只要文本主干 + 多模态编码器） ====
-from transformers import AutoConfig, AutoTokenizer
-from transformers.models.qwen2_5_omni import Qwen2_5OmniThinkerForConditionalGeneration
-from transformers import AutoProcessor
-from typing import Dict, Any, Optional, Tuple, List
-import torch, torch.nn as nn, torch.nn.functional as F
 
 def build_causal(mask_len, device):
     return torch.triu(torch.full((mask_len, mask_len), float("-inf"), device=device), diagonal=1)\
