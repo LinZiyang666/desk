@@ -1046,10 +1046,10 @@ class TextAndVideoFrontAndTwoLayers(nn.Module):
         vid_hidden_front: torch.Tensor
         vid_cu_window_seqlens: torch.Tensor
         video_grid_thw: torch.Tensor
-        if isinstance(video_inputs, dict) and any(
-            k in video_inputs for k in ["pixel_values", "pixel_values_list"]
-        ):
-            vh, vc, vg = self.vision_front(video_inputs)
+        if isinstance(video_inputs, dict):
+            pixel_values = video_inputs.get("pixel_values_videos") or video_inputs.get("pixel_values")
+            if isinstance(pixel_values, torch.Tensor) and pixel_values.numel() > 0:
+                vh, vc, vg = self.vision_front(video_inputs)
             try:
                 rid = dist.get_rank() if dist.is_initialized() else -1
                 print(f"[rank{rid}] TextAndVideoFront.forward: vision_front -> hidden={tuple(vh.shape) if isinstance(vh, torch.Tensor) else None} "
