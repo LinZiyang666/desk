@@ -341,9 +341,8 @@ class PipelineStage_with_mutiple_ranks(PipelineStage):
 
         # 预计算每个梯度的 1D 视图与切片表（只发浮点/复数梯度，保持你原逻辑）
         # …前置不变…
-        plans = []  # [(slot_idx, flat, slices)]
-        slot_ctr = 0  # ===== TAG-ADD =====
-        for grad, grad_recv_stage in zip(grads_input, self.grad_send_info):
+        plans: list[tuple[int, torch.Tensor, list[tuple[int, int]]]] = []
+        for slot_idx, (grad, grad_recv_stage) in enumerate(zip(grads_input, self.grad_send_info)):
             if grad_recv_stage is None:
                 continue
             if not isinstance(grad, torch.Tensor):
@@ -357,8 +356,7 @@ class PipelineStage_with_mutiple_ranks(PipelineStage):
                 continue
             flat = grad.contiguous().view(-1)
             slices = self._compute_1d_slices(flat.numel(), num_splits)
-            plans.append((slot_ctr, flat, slices))  # ===== TAG-ADD =====
-            slot_ctr += 1                           # ===== TAG-ADD =====
+            plans.append((slot_idx, flat, slices))  # ===== TAG-ADD =====
 
         ops: list[dist.P2POp] = []
         ops_per_chunk: list[int] = [0 for _ in range(max(1, num_splits))]
