@@ -1953,7 +1953,7 @@ def main():
     proc = AutoProcessor.from_pretrained(MODEL_ID)
 
     # 调节最大视频帧数
-    video_max_frames = max(1, 1)
+    video_max_frames = max(1, 10)
     if rank == 0:
         print(f"[rank0] video_max_frames limit set to {video_max_frames}")
     
