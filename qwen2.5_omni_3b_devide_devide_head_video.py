@@ -64,6 +64,23 @@ def _load_video_pack(proc, path, vision_module, max_tubelets=16):
         print(f"[video_loader] torchvision fallback failed with {type(e2).__name__}: {e2}")
     print("[video_loader] returning empty video pack")
     return {"pixel_values_videos": None, "video_grid_thw": None}
+
+
+def _replicate_video_pack_for_microbatches(video_pack: Optional[Dict[str, torch.Tensor]], num_microbatches: int) -> Optional[Dict[str, torch.Tensor]]:
+    if video_pack is None or num_microbatches <= 1:
+        return video_pack
+    replicated: Dict[str, torch.Tensor] = {}
+    for key, value in video_pack.items():
+        if isinstance(value, torch.Tensor):
+            if value.numel() == 0:
+                replicated[key] = value
+                continue
+            reps = [1] * (value.dim() + 1)
+            reps[0] = num_microbatches
+            replicated[key] = value.unsqueeze(0).repeat(*reps).contiguous()
+        else:
+            replicated[key] = value
+    return replicated
 import time, math
 
 from stage_with_mutiple_ranks import PipelineStage_with_mutiple_ranks, PipelineStage_Multimodality
@@ -2299,6 +2316,7 @@ def main():
                 # Build video pack from ./video.mp4 once and broadcast
                 if video_pack_cache is None:
                     video_pack_cache = _load_video_pack(proc, "./video.mp4", vision_enc, max_tubelets=16)
+                    video_pack_cache = _replicate_video_pack_for_microbatches(video_pack_cache, microbatch_num)
                     if video_pack_cache is None or video_pack_cache.get("pixel_values_videos") is None:
                         print("[rank0] warning: _load_video_pack returned empty pack")
                     if step < 2:
@@ -2346,6 +2364,7 @@ def main():
                 buf_vid = [None]
                 dist.broadcast_object_list(buf_vid, src=0)
                 video_pack = buf_vid[0]
+                video_pack = _replicate_video_pack_for_microbatches(video_pack, microbatch_num)
                 buf_vis = [None]
                 dist.broadcast_object_list(buf_vis, src=0)
                 vis_pack = buf_vis[0]
