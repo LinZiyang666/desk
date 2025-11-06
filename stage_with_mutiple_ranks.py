@@ -401,24 +401,27 @@ class PipelineStage_with_mutiple_ranks(PipelineStage):
         peer_rank = dest_rank
         peer_global_rank = (peer_rank if self.group is None else dist.get_global_rank(self.group, peer_rank))
 
-        plans = []  # [(slot_idx, buf_flat, slices)]
-        slot_ctr = 0  # ===== TAG-ADD =====
-        for info in recv_infos:  # 保持你原来的写法，不读 arg_idx
-            if isinstance(info, _RecvInfo) and isinstance(info.buffer, torch.Tensor):
-                buf_flat = info.buffer.contiguous().view(-1)
-                slices = self._compute_1d_slices(buf_flat.numel(), num_splits)
-                plans.append((slot_ctr, buf_flat, slices))  # ===== TAG-ADD =====
-                slot_ctr += 1                               # ===== TAG-ADD =====
+        plans: list[tuple[int, torch.Tensor, list[tuple[int, int]]]] = []
+        for slot_idx, info in enumerate(recv_infos):
+            if not (isinstance(info, _RecvInfo) and isinstance(info.buffer, torch.Tensor)):
+                continue
+            buf_flat = info.buffer.contiguous().view(-1)
+            slices = self._compute_1d_slices(buf_flat.numel(), num_splits)
+            plans.append((slot_idx, buf_flat, slices))
+
+        valid_slots = len(plans)
         try:
-            if slot_ctr and bwd_chunk_id < 4:
+            if valid_slots and bwd_chunk_id < 4:
                 stage_type = getattr(self, "modal_type", getattr(self, "model_type", ""))
                 recv_shapes = [
                     tuple(info.buffer.shape) if isinstance(info, _RecvInfo) and isinstance(info.buffer, torch.Tensor) else None
                     for info in recv_infos
                 ]
+                slot_list = [slot for slot, _, _ in plans]
                 print(
                     f"[rank{dist.get_rank()}] get_bwd_recv_ops: stage={self.stage_index} type={stage_type} "
-                    f"modality={modality} mb={bwd_chunk_id} expected_recv_slots={slot_ctr} recv_shapes={recv_shapes}"
+                    f"modality={modality} mb={bwd_chunk_id} expected_recv_slots={valid_slots} "
+                    f"slots={slot_list} recv_shapes={recv_shapes}"
                 )
         except Exception:
             pass
