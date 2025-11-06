@@ -1064,7 +1064,11 @@ class TextAndVideoFrontAndTwoLayers(nn.Module):
                 norm_inputs["pixel_values_videos"] = pv
                 print(f"[rank{rid}] TextAndVideoFront.forward: pixel_values_videos shape={tuple(pv.shape)}")
 
-            grid = video_inputs.get("video_grid_thw") or video_inputs.get("grid_thw") or video_inputs.get("image_grid_thw")
+            grid = video_inputs.get("video_grid_thw")
+            if grid is None:
+                grid = video_inputs.get("grid_thw")
+            if grid is None:
+                grid = video_inputs.get("image_grid_thw")
             if isinstance(grid, torch.Tensor):
                 norm_inputs["video_grid_thw"] = grid
                 print(f"[rank{rid}] TextAndVideoFront.forward: video_grid_thw shape={tuple(grid.shape)}")
