@@ -1460,10 +1460,9 @@ class PipelineStage_Multimodality(PipelineStage_with_mutiple_ranks):
                 peer_rank = self._recv_peer_from_info(info, (src_rank_fallback if src_rank_fallback is not None else 0))
                 peer_global_rank = self._peer_global_rank(peer_rank)
 
-            plans.append((slot_ctr, tmp_full_flat, slices, peer_global_rank, shape, dtype, device))
+            plans.append((slot_idx, tmp_full_flat, slices, peer_global_rank, shape, dtype, device))
             # 记录到“完成后处理”
             self._mm_fwd_post_recv[(fwd_chunk_id, modality)].append((tmp_full_flat, shape, dtype, device))
-            slot_ctr += 1
 
         for split_idx in range(max(1, num_splits)):
             for slot_idx, tmp_full_flat, slices, peer_global_rank, shape, dtype, device in plans:
