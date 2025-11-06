@@ -43,7 +43,14 @@ def _load_video_pack(proc, path, vision_module, max_tubelets=16):
         ):
             return pv_tensor, grid_tensor
 
-        tubelet_axis = 1 if pv_tensor.dim() >= 3 else 0
+        if pv_tensor.dim() < 3:
+            try:
+                print(f"[video_loader] skip tubelet clipping: dim={pv_tensor.dim()} shape={tuple(pv_tensor.shape)}")
+            except Exception:
+                pass
+            return pv_tensor, grid_tensor
+
+        tubelet_axis = 1
         if pv_tensor.shape[tubelet_axis] <= max_tubelets:
             return pv_tensor, grid_tensor
 
