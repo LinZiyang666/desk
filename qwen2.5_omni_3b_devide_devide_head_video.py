@@ -6,6 +6,45 @@ import torch.distributed as dist
 from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 from datasets import load_dataset
 from tqdm import tqdm
+
+# Helper to load local ./video.mp4 once and convert to processor-ready video pack
+def _load_video_pack(proc, path, vision_module, max_tubelets=16):
+    try:
+        batch = proc(videos=[path], return_tensors="pt")
+        pv = batch.get("pixel_values_videos", None)
+        vthw = batch.get("video_grid_thw", None)
+        if pv is not None and vthw is not None and pv.shape[0] >= 1:
+            # Optionally clip tubelets to reduce memory
+            if max_tubelets is not None and pv.shape[1] > max_tubelets:
+                batch["pixel_values_videos"] = pv[:, :max_tubelets]
+                batch["video_grid_thw"] = vthw.clone()
+                batch["video_grid_thw"][:, 0] = max_tubelets
+            return {
+                "pixel_values_videos": batch["pixel_values_videos"],
+                "video_grid_thw": batch["video_grid_thw"],
+            }
+    except Exception as e:
+        pass
+    try:
+        # Fallback with torchvision if direct path processing is unsupported
+        from torchvision.io import read_video
+        vframes, _, _ = read_video(path, pts_unit="sec")  # [T,H,W,3] uint8
+        frame_list = [f.cpu().numpy() for f in vframes]   # list of HWC uint8
+        batch = proc(videos=[frame_list], return_tensors="pt")
+        pv = batch.get("pixel_values_videos", None)
+        vthw = batch.get("video_grid_thw", None)
+        if pv is not None and vthw is not None:
+            if max_tubelets is not None and pv.shape[1] > max_tubelets:
+                batch["pixel_values_videos"] = pv[:, :max_tubelets]
+                batch["video_grid_thw"] = vthw.clone()
+                batch["video_grid_thw"][:, 0] = max_tubelets
+            return {
+                "pixel_values_videos": batch["pixel_values_videos"],
+                "video_grid_thw": batch["video_grid_thw"],
+            }
+    except Exception as e2:
+        pass
+    return {"pixel_values_videos": None, "video_grid_thw": None}
 import time, math
 
 from stage_with_mutiple_ranks import PipelineStage_with_mutiple_ranks, PipelineStage_Multimodality
@@ -987,13 +1026,42 @@ class TextAndVideoEncoderMidRest(nn.Module):
         super().__init__()
         self.vision_midrest = vision_midrest
 
-    def forward(self, base_tuple, video_front=None):
+    def forward(self, *args, **kwargs):
+        base_tuple = None
+        video_front = None
+
+        # 读取 kwargs
+        if "base_tuple" in kwargs:
+            base_tuple = kwargs.pop("base_tuple")
+        if "video_front" in kwargs:
+            video_front = kwargs.pop("video_front")
+
+        # 解析 args
+        if base_tuple is None:
+            if len(args) == 0:
+                # 形状推理阶段，允许空调用，返回结构占位
+                return (None, None, None, None, None), None
+            elif len(args) == 1:
+                base_tuple = args[0]
+            elif len(args) >= 5:
+                # 展开式传入五个文本相关张量
+                base_tuple = tuple(args[:5])
+                if len(args) >= 6:
+                    video_front = args[5]
+            else:
+                # 保护性降级，形状推理兼容
+                return (None, None, None, None, None), None
+
+        # 拆解文本侧元组
         hidden, attn_4d, position_ids, input_ids, attention_mask = base_tuple
+
+        # 可选的视频后段计算
         video_outputs = None
         if video_front is not None:
             vid_h, vid_cu, grid_thw = video_front
             vid_h, _, grid_thw = self.vision_midrest(vid_h, vid_cu, grid_thw)
             video_outputs = {"video_embeds": vid_h, "video_grid_thw": grid_thw}
+
         return (hidden, attn_4d, position_ids, input_ids, attention_mask), video_outputs
 
 
@@ -1469,6 +1537,8 @@ def main():
             print("[warn] cannot set max_source_positions:", e)
     proc = AutoProcessor.from_pretrained(MODEL_ID)
     
+    # Cache for one-shot local video pack
+    video_pack_cache = None
     # 便捷访问
     text_model   = thinker.model           # 纯解码器主干（有 embed_tokens / layers / norm）
     audio_enc    = getattr(thinker, "audio_tower", None)
@@ -1923,6 +1993,19 @@ def main():
 
                 # Broadcast vision/audio packs as Python objects
                 buf_vis = [vis_pack]
+
+                # Build video pack from ./video.mp4 once and broadcast
+                if video_pack_cache is None:
+                    video_pack_cache = _load_video_pack(proc, "./video.mp4", vision_enc, max_tubelets=16)
+                    if step < 2:
+                        try:
+                            pv = video_pack_cache["pixel_values_videos"]
+                            vthw = video_pack_cache["video_grid_thw"]
+                            print(f"[rank0] video pack: pv={tuple(pv.shape) if pv is not None else None}, grid={tuple(vthw.shape) if vthw is not None else None}")
+                        except Exception:
+                            print("[rank0] video pack prepared")
+                buf_vid = [video_pack_cache]
+                dist.broadcast_object_list(buf_vid, src=0)
                 dist.broadcast_object_list(buf_vis, src=0)
                 buf_aud = [aud_pack]
                 dist.broadcast_object_list(buf_aud, src=0)
@@ -1961,6 +2044,10 @@ def main():
                 dist.broadcast_object_list(buf_aud, src=0)
                 aud_pack = buf_aud[0]
 
+
+                buf_vid = [None]
+                dist.broadcast_object_list(buf_vid, src=0)
+                video_pack = buf_vid[0]
                 # Debug first two steps: confirm reception on non-zero ranks
                 if step < 2:
                     rk = rank
@@ -1979,7 +2066,7 @@ def main():
                     sched.step(vision_inputs=vis_pack, attention_mask=attn, target=tgt)
                 elif rank == 2:
                     # Text head executes with text inputs
-                    sched.step(inp_ids, attention_mask=attn, target=tgt)
+                    sched.step(inp_ids, attention_mask=attn, target=tgt, video_inputs=video_pack)
                 else:
                     # Packing and later stages only need target to drive schedule
                     sched.step(target=tgt)
