@@ -2036,18 +2036,16 @@ def main():
                 dist.broadcast(inp_ids, src=0)
                 dist.broadcast(attn, src=0)
 
-                # Receive vision/audio packs
+                # Receive video/vision/audio packs in the same order as rank 0 broadcasts
+                buf_vid = [None]
+                dist.broadcast_object_list(buf_vid, src=0)
+                video_pack = buf_vid[0]
                 buf_vis = [None]
                 dist.broadcast_object_list(buf_vis, src=0)
                 vis_pack = buf_vis[0]
                 buf_aud = [None]
                 dist.broadcast_object_list(buf_aud, src=0)
                 aud_pack = buf_aud[0]
-
-
-                buf_vid = [None]
-                dist.broadcast_object_list(buf_vid, src=0)
-                video_pack = buf_vid[0]
                 # Debug first two steps: confirm reception on non-zero ranks
                 if step < 2:
                     rk = rank
@@ -2060,6 +2058,13 @@ def main():
                             print(f"[rank{rk}] train-step {step}: received aud_pack keys/shapes: {kv}")
                         except Exception:
                             print(f"[rank{rk}] train-step {step}: received aud_pack present but cannot summarize")
+                    if video_pack is not None:
+                        try:
+                            pv = video_pack.get("pixel_values_videos", None)
+                            vthw = video_pack.get("video_grid_thw", None)
+                            print(f"[rank{rk}] train-step {step}: received video pack pv={tuple(pv.shape) if pv is not None else None}, grid={tuple(vthw.shape) if vthw is not None else None}")
+                        except Exception:
+                            print(f"[rank{rk}] train-step {step}: received video pack but cannot summarize")
 
                 if rank == 1:
                     # Vision head executes with vision inputs：作为 kwargs 传入，并带上 attention_mask 以便 microbatch 大小推断
