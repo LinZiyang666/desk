@@ -981,6 +981,13 @@ class TextAndVideoFrontAndTwoLayers(nn.Module):
         video_inputs: Optional[Dict[str, torch.Tensor]] = None,
     ):
         device = input_ids.device
+        try:
+            rid = dist.get_rank() if dist.is_initialized() else -1
+            vk = sorted(list(video_inputs.keys())) if isinstance(video_inputs, dict) else None
+            print(f"[rank{rid}] TextAndVideoFront.forward: input_ids={tuple(input_ids.shape)} attention_mask={tuple(attention_mask.shape) if isinstance(attention_mask, torch.Tensor) else None} "
+                  f"video_keys={vk}")
+        except Exception:
+            pass
         # 文本 head 与你原 TextStage 一致
         B, T = input_ids.shape
         hidden = self.embed_tokens(input_ids)
@@ -1005,6 +1012,12 @@ class TextAndVideoFrontAndTwoLayers(nn.Module):
             k in video_inputs for k in ["pixel_values", "pixel_values_list"]
         ):
             vh, vc, vg = self.vision_front(video_inputs)
+            try:
+                rid = dist.get_rank() if dist.is_initialized() else -1
+                print(f"[rank{rid}] TextAndVideoFront.forward: vision_front -> hidden={tuple(vh.shape) if isinstance(vh, torch.Tensor) else None} "
+                      f"cu={tuple(vc.shape) if isinstance(vc, torch.Tensor) else None} grid={tuple(vg.shape) if isinstance(vg, torch.Tensor) else None}")
+            except Exception:
+                pass
             if isinstance(vh, torch.Tensor) and vh.numel() > 0:
                 vid_hidden_front = vh.contiguous()
             else:
@@ -1037,6 +1050,11 @@ class TextAndVideoFrontAndTwoLayers(nn.Module):
                 dtype=torch.long,
                 device=hidden.device,
             )
+        try:
+            rid = dist.get_rank() if dist.is_initialized() else -1
+            print(f"[rank{rid}] TextAndVideoFront.forward: return video_front shapes hidden={tuple(vid_hidden_front.shape)} cu={tuple(vid_cu_window_seqlens.shape)} grid={tuple(video_grid_thw.shape)}")
+        except Exception:
+            pass
 
         return (
             hidden,
@@ -1116,6 +1134,23 @@ class TextAndVideoEncoderMidRest(nn.Module):
                 )
                 video_embeds = vid_out.contiguous()
                 video_grid_thw = grid_out.to(dtype=torch.long).contiguous()
+                try:
+                    rid = dist.get_rank() if dist.is_initialized() else -1
+                    print(f"[rank{rid}] TextAndVideoEncoderMidRest.forward: vision_midrest -> video_embeds={tuple(video_embeds.shape)} grid={tuple(video_grid_thw.shape)}")
+                except Exception:
+                    pass
+            else:
+                try:
+                    rid = dist.get_rank() if dist.is_initialized() else -1
+                    print(f"[rank{rid}] TextAndVideoEncoderMidRest.forward: video inputs empty -> vid_hidden_front={type(vid_hidden_front)} numel={(vid_hidden_front.numel() if isinstance(vid_hidden_front, torch.Tensor) else 'NA')}")
+                except Exception:
+                    pass
+        else:
+            try:
+                rid = dist.get_rank() if dist.is_initialized() else -1
+                print(f"[rank{rid}] TextAndVideoEncoderMidRest.forward: args len={len(args)} (<8) video branch skipped")
+            except Exception:
+                pass
 
         return (
             hidden,
