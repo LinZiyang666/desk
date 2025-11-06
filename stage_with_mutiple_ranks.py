@@ -1868,8 +1868,21 @@ class PipelineStage_Multimodality(PipelineStage_with_mutiple_ranks):
                 f"[rank{dist.get_rank()}] packing stage missing required text tensors at mb={fwd_chunk_id}: "
                 f"hidden={type(hidden)}, attn_4d={type(attn_4d)}"
             )
+        video_embeds_extra = None
+        video_grid_extra = None
+        if len(text_tuple) >= 6 and isinstance(text_tuple[5], torch.Tensor):
+            candidate = text_tuple[5]
+            if candidate.is_floating_point() and candidate.numel() > 0:
+                video_embeds_extra = candidate
+        if len(text_tuple) >= 7 and isinstance(text_tuple[6], torch.Tensor):
+            grid_candidate = text_tuple[6]
+            if grid_candidate.numel() > 0:
+                video_grid_extra = grid_candidate
+
         image_embeds, grid_thw = _parse_vision_bundle(vision_tuple)
         audio_embeds = _parse_audio_bundle(audio_tuple)
+        if grid_thw is None and video_grid_extra is not None:
+            grid_thw = video_grid_extra
 
         # ---------- 组装子模块 (args, kwargs) ----------
         # 若 position_ids 为空，为了通过输入校验，这里传空张量；Stage1 内部可选择重算
@@ -1881,6 +1894,15 @@ class PipelineStage_Multimodality(PipelineStage_with_mutiple_ranks):
         if image_embeds is not None:       composite_kwargs["image_embeds"] = image_embeds
         if audio_embeds is not None:       composite_kwargs["audio_embeds"] = audio_embeds
         if grid_thw is not None:           composite_kwargs["grid_thw"] = grid_thw
+        if video_embeds_extra is not None:
+            if isinstance(input_ids, torch.Tensor):
+                video_grid_default = input_ids.new_empty(0, 3, dtype=torch.long)
+            else:
+                video_grid_default = None
+            composite_kwargs["video_outputs"] = {
+                "video_embeds": video_embeds_extra,
+                "video_grid_thw": video_grid_extra if video_grid_extra is not None else video_grid_default,
+            }
 
         # ---------- 验证（与父类一致） ----------
         kwargs_for_val = composite_kwargs

@@ -958,9 +958,10 @@ class TextAndVideoFrontAndTwoLayers(nn.Module):
        (hidden, attn_4d, position_ids, input_ids, attention_mask)
     2 借用 VisionFrontAndTwoLayers 对视频执行前半段编码 返回给下游承接
 
-    forward 额外返回一个 video_front tuple
-      video_front = (vid_hidden_front, vid_cu_window_seqlens, video_grid_thw)
-    若无视频输入 则返回 None
+    forward 返回一个长度为 8 的张量元组：
+      (hidden, attn_4d, position_ids, input_ids, attention_mask,
+       vid_hidden_front, vid_cu_window_seqlens, video_grid_thw)
+    若无视频输入，对应张量会退化为 0 长度占位，保持纯张量结构
     """
     def __init__(self, text_model: nn.Module, vision_front: nn.Module):
         super().__init__()
@@ -990,19 +991,63 @@ class TextAndVideoFrontAndTwoLayers(nn.Module):
         pad = attention_mask[:, None, None, :]
         attn_4d = causal[None, None, :, :] * pad
         position_ids = self._build_base_pos_ids(B, T, device)
-        base_tuple = (
-            hidden.contiguous(),
-            attn_4d.contiguous(),
+        hidden = hidden.contiguous()
+        attn_4d = attn_4d.contiguous()
+        position_ids = position_ids.contiguous()
+        input_ids = input_ids.contiguous()
+        attention_mask = attention_mask.contiguous()
+
+        # 视频前段：统一转成张量占位，避免 None 进入管线
+        vid_hidden_front: torch.Tensor
+        vid_cu_window_seqlens: torch.Tensor
+        video_grid_thw: torch.Tensor
+        if isinstance(video_inputs, dict) and any(
+            k in video_inputs for k in ["pixel_values", "pixel_values_list"]
+        ):
+            vh, vc, vg = self.vision_front(video_inputs)
+            if isinstance(vh, torch.Tensor) and vh.numel() > 0:
+                vid_hidden_front = vh.contiguous()
+            else:
+                vid_hidden_front = hidden.new_empty(0, hidden.size(-1))
+            if isinstance(vc, torch.Tensor) and vc.numel() > 0:
+                vid_cu_window_seqlens = vc.contiguous()
+            else:
+                vid_cu_window_seqlens = torch.zeros(
+                    1,
+                    dtype=torch.int32,
+                    device=hidden.device,
+                )
+            if isinstance(vg, torch.Tensor) and vg.numel() > 0:
+                video_grid_thw = vg.to(dtype=torch.long, device=hidden.device).contiguous()
+            else:
+                video_grid_thw = torch.zeros(
+                    (0, 3),
+                    dtype=torch.long,
+                    device=hidden.device,
+                )
+        else:
+            vid_hidden_front = hidden.new_empty(0, hidden.size(-1))
+            vid_cu_window_seqlens = torch.zeros(
+                1,
+                dtype=torch.int32,
+                device=hidden.device,
+            )
+            video_grid_thw = torch.zeros(
+                (0, 3),
+                dtype=torch.long,
+                device=hidden.device,
+            )
+
+        return (
+            hidden,
+            attn_4d,
             position_ids,
-            input_ids.contiguous(),
-            attention_mask.contiguous(),
+            input_ids,
+            attention_mask,
+            vid_hidden_front,
+            vid_cu_window_seqlens,
+            video_grid_thw,
         )
-        # 视频前段
-        video_front = None
-        if isinstance(video_inputs, dict) and any(k in video_inputs for k in ["pixel_values", "pixel_values_list"]):
-            vid_hidden_front, vid_cu_window_seqlens, video_grid_thw = self.vision_front(video_inputs)
-            video_front = (vid_hidden_front, vid_cu_window_seqlens, video_grid_thw)
-        return base_tuple, video_front
 
 
 # =====================
@@ -1015,54 +1060,72 @@ class TextAndVideoEncoderMidRest(nn.Module):
     文本相关张量原样透传 不做任何改变
 
     forward 输入
-      base_tuple = (hidden, attn_4d, position_ids, input_ids, attention_mask)
-      video_front = None 或 (vid_hidden_front, vid_cu_window_seqlens, video_grid_thw)
+      与前一阶段输出一致的 8 个张量：
+      (hidden, attn_4d, position_ids, input_ids, attention_mask,
+       vid_hidden_front, vid_cu_window_seqlens, video_grid_thw)
 
-    forward 输出
-      base_tuple 与 video_outputs
-      其中 video_outputs = None 或 {"video_embeds": Tensor, "video_grid_thw": LongTensor}
+    forward 输出一个张量元组：
+      (hidden, attn_4d, position_ids, input_ids, attention_mask,
+       video_embeds, video_grid_thw)
+    若当前 microbatch 无视频，则 video_embeds / video_grid_thw 为空张量
     """
     def __init__(self, vision_midrest: nn.Module):
         super().__init__()
         self.vision_midrest = vision_midrest
 
-    def forward(self, *args, **kwargs):
-        base_tuple = None
-        video_front = None
+    def forward(self, *args):
+        if len(args) < 5:
+            raise RuntimeError(
+                "TextAndVideoEncoderMidRest expects at least 5 tensors: hidden, attn_4d, position_ids, input_ids, attention_mask."
+            )
 
-        # 读取 kwargs
-        if "base_tuple" in kwargs:
-            base_tuple = kwargs.pop("base_tuple")
-        if "video_front" in kwargs:
-            video_front = kwargs.pop("video_front")
+        hidden = args[0].contiguous()
+        attn_4d = args[1].contiguous()
+        position_ids = args[2].contiguous()
+        input_ids = args[3].contiguous()
+        attention_mask = args[4].contiguous()
 
-        # 解析 args
-        if base_tuple is None:
-            if len(args) == 0:
-                # 形状推理阶段，允许空调用，返回结构占位
-                return (None, None, None, None, None), None
-            elif len(args) == 1:
-                base_tuple = args[0]
-            elif len(args) >= 5:
-                # 展开式传入五个文本相关张量
-                base_tuple = tuple(args[:5])
-                if len(args) >= 6:
-                    video_front = args[5]
-            else:
-                # 保护性降级，形状推理兼容
-                return (None, None, None, None, None), None
+        # 默认的占位，避免 None 传播
+        device = hidden.device if isinstance(hidden, torch.Tensor) else torch.device("cpu")
+        hidden_dim = hidden.size(-1) if isinstance(hidden, torch.Tensor) and hidden.dim() >= 2 else 0
+        video_embeds = (
+            hidden.new_empty(0, hidden_dim)
+            if isinstance(hidden, torch.Tensor) and hidden_dim > 0
+            else torch.empty(0, device=device)
+        )
+        video_grid_thw = (
+            input_ids.new_empty(0, 3, dtype=torch.long)
+            if isinstance(input_ids, torch.Tensor)
+            else torch.empty(0, 3, dtype=torch.long, device=device)
+        )
 
-        # 拆解文本侧元组
-        hidden, attn_4d, position_ids, input_ids, attention_mask = base_tuple
+        if len(args) >= 8:
+            vid_hidden_front = args[5]
+            vid_cu_window_seqlens = args[6]
+            video_grid_front = args[7]
+            if (
+                isinstance(vid_hidden_front, torch.Tensor)
+                and vid_hidden_front.numel() > 0
+                and isinstance(vid_cu_window_seqlens, torch.Tensor)
+                and isinstance(video_grid_front, torch.Tensor)
+            ):
+                vid_out, _, grid_out = self.vision_midrest(
+                    vid_hidden_front,
+                    vid_cu_window_seqlens,
+                    video_grid_front,
+                )
+                video_embeds = vid_out.contiguous()
+                video_grid_thw = grid_out.to(dtype=torch.long).contiguous()
 
-        # 可选的视频后段计算
-        video_outputs = None
-        if video_front is not None:
-            vid_h, vid_cu, grid_thw = video_front
-            vid_h, _, grid_thw = self.vision_midrest(vid_h, vid_cu, grid_thw)
-            video_outputs = {"video_embeds": vid_h, "video_grid_thw": grid_thw}
-
-        return (hidden, attn_4d, position_ids, input_ids, attention_mask), video_outputs
+        return (
+            hidden,
+            attn_4d,
+            position_ids,
+            input_ids,
+            attention_mask,
+            video_embeds,
+            video_grid_thw,
+        )
 
 
 # =====================
