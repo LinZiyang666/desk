@@ -44,11 +44,48 @@ def _load_video_pack(proc, path, vision_module, max_tubelets=16):
             return pv_tensor, grid_tensor
 
         if pv_tensor.dim() < 3:
+            if not (isinstance(grid_tensor, torch.Tensor) and grid_tensor.numel() > 0):
+                try:
+                    print(f"[video_loader] skip tubelet clipping: dim={pv_tensor.dim()} shape={tuple(pv_tensor.shape)} grid missing")
+                except Exception:
+                    pass
+                return pv_tensor, grid_tensor
+
+            grid = grid_tensor.clone()
+            if grid.dim() == 1:
+                grid = grid.unsqueeze(0)
+            elif grid.dim() > 2:
+                grid = grid.view(-1, grid.size(-1))
+
+            tokens_per_frame = (grid[:, 1] * grid[:, 2]).to(dtype=torch.long)
+            new_chunks = []
+            offset = 0
+            total_available = pv_tensor.size(0)
+            for idx in range(grid.size(0)):
+                total_frames = int(grid[idx, 0].item())
+                per_frame = int(tokens_per_frame[idx].item())
+                total_tokens = total_frames * per_frame
+                keep_frames = min(total_frames, max_tubelets)
+                keep_tokens = keep_frames * per_frame
+                upper = min(offset + total_tokens, total_available)
+                available = max(upper - offset, 0)
+                slice_tokens = min(available, keep_tokens)
+                if slice_tokens <= 0:
+                    slice_tokens = 0
+                if slice_tokens > 0:
+                    seg = pv_tensor[offset: offset + slice_tokens]
+                    new_chunks.append(seg)
+                offset = upper
+                grid[idx, 0] = max(keep_frames, 0)
+            if new_chunks:
+                pv_tensor = torch.cat(new_chunks, dim=0).contiguous()
+            else:
+                pv_tensor = pv_tensor.new_empty(0, pv_tensor.size(-1))
             try:
-                print(f"[video_loader] skip tubelet clipping: dim={pv_tensor.dim()} shape={tuple(pv_tensor.shape)}")
+                print(f"[video_loader] clipped tubelets(flat) frames={grid[:,0].tolist()} tokens={pv_tensor.shape[0]}")
             except Exception:
                 pass
-            return pv_tensor, grid_tensor
+            return pv_tensor, grid
 
         tubelet_axis = 1
         if pv_tensor.shape[tubelet_axis] <= max_tubelets:
@@ -1914,6 +1951,11 @@ def main():
         except Exception as e:
             print("[warn] cannot set max_source_positions:", e)
     proc = AutoProcessor.from_pretrained(MODEL_ID)
+
+    # 调节最大视频帧数
+    video_max_frames = max(1, 1)
+    if rank == 0:
+        print(f"[rank0] video_max_frames limit set to {video_max_frames}")
     
     # Cache for one-shot local video pack
     video_pack_cache = None
@@ -2372,7 +2414,7 @@ def main():
 
                 # Build video pack from ./video.mp4 once and broadcast
                 if video_pack_cache is None:
-                    video_pack_cache = _load_video_pack(proc, "./video.mp4", vision_enc, max_tubelets=16)
+                    video_pack_cache = _load_video_pack(proc, "./video.mp4", vision_enc, max_tubelets=video_max_frames)
                     video_pack_cache = _replicate_video_pack_for_microbatches(video_pack_cache, microbatch_num)
                     if video_pack_cache is None or video_pack_cache.get("pixel_values_videos") is None:
                         print("[rank0] warning: _load_video_pack returned empty pack")
