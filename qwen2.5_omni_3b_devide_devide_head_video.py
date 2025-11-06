@@ -1052,24 +1052,29 @@ class TextAndVideoFrontAndTwoLayers(nn.Module):
         vid_cu_window_seqlens: torch.Tensor
         video_grid_thw: torch.Tensor
         if isinstance(video_inputs, dict):
-            pixel_values = video_inputs.get("pixel_values_videos")
-            if pixel_values is None:
-                pixel_values = video_inputs.get("pixel_values")
-            if isinstance(pixel_values, torch.Tensor):
-                try:
-                    rid = dist.get_rank() if dist.is_initialized() else -1
-                    print(
-                        f"[rank{rid}] TextAndVideoFront.forward: pixel_values shape={tuple(pixel_values.shape)}"
-                    )
-                except Exception:
-                    pass
-            if isinstance(pixel_values, torch.Tensor) and pixel_values.numel() > 0:
-                try:
-                    rid = dist.get_rank() if dist.is_initialized() else -1
-                    print(f"[rank{rid}] TextAndVideoFront.forward: invoking vision_front")
-                except Exception:
-                    pass
-                vh, vc, vg = self.vision_front(video_inputs)
+            rid = dist.get_rank() if dist.is_initialized() else -1
+            print(f"[rank{rid}] TextAndVideoFront.forward: raw video_inputs keys={list(video_inputs.keys())}")
+
+            # Normalize incoming keys to what vision_front expects
+            norm_inputs: dict[str, torch.Tensor] = {}
+            pv = video_inputs.get("pixel_values_videos")
+            if pv is None:
+                pv = video_inputs.get("pixel_values")
+            if isinstance(pv, torch.Tensor):
+                norm_inputs["pixel_values_videos"] = pv
+                print(f"[rank{rid}] TextAndVideoFront.forward: pixel_values_videos shape={tuple(pv.shape)}")
+
+            grid = video_inputs.get("video_grid_thw") or video_inputs.get("grid_thw") or video_inputs.get("image_grid_thw")
+            if isinstance(grid, torch.Tensor):
+                norm_inputs["video_grid_thw"] = grid
+                print(f"[rank{rid}] TextAndVideoFront.forward: video_grid_thw shape={tuple(grid.shape)}")
+
+            if norm_inputs:
+                if any(t.numel() == 0 for t in norm_inputs.values() if isinstance(t, torch.Tensor)):
+                    print(f"[rank{rid}] TextAndVideoFront.forward: norm_inputs contain empty tensors; skip vision front")
+                else:
+                    print(f"[rank{rid}] TextAndVideoFront.forward: invoking vision_front with keys {list(norm_inputs.keys())}")
+                    vh, vc, vg = self.vision_front(norm_inputs)
             try:
                 rid = dist.get_rank() if dist.is_initialized() else -1
                 print(f"[rank{rid}] TextAndVideoFront.forward: vision_front -> hidden={tuple(vh.shape) if isinstance(vh, torch.Tensor) else None} "
