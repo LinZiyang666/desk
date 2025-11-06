@@ -93,9 +93,11 @@ def _replicate_video_pack_for_microbatches(video_pack: Optional[Dict[str, torch.
             if value.numel() == 0:
                 replicated[key] = value
                 continue
+            print(f"[video_replicate] key={key} original shape={tuple(value.shape)}")
             reps = [1] * (value.dim() + 1)
             reps[0] = num_microbatches
             replicated[key] = value.unsqueeze(0).repeat(*reps).contiguous()
+            print(f"[video_replicate] key={key} replicated shape={tuple(replicated[key].shape)}")
         else:
             replicated[key] = value
     return replicated
@@ -1047,15 +1049,15 @@ class TextAndVideoFrontAndTwoLayers(nn.Module):
         input_ids = input_ids.contiguous()
         attention_mask = attention_mask.contiguous()
 
-        # 视频前段：统一转成张量占位，避免 None 进入管线
-        vid_hidden_front: torch.Tensor
-        vid_cu_window_seqlens: torch.Tensor
-        video_grid_thw: torch.Tensor
+        # 视频前段：默认占位
+        vid_hidden_front: torch.Tensor = hidden.new_empty(0, hidden.size(-1))
+        vid_cu_window_seqlens: torch.Tensor = torch.zeros(1, dtype=torch.int32, device=hidden.device)
+        video_grid_thw: torch.Tensor = torch.zeros((0, 3), dtype=torch.long, device=hidden.device)
+
         if isinstance(video_inputs, dict):
             rid = dist.get_rank() if dist.is_initialized() else -1
             print(f"[rank{rid}] TextAndVideoFront.forward: raw video_inputs keys={list(video_inputs.keys())}")
 
-            # Normalize incoming keys to what vision_front expects (pixel_values/grid_thw)
             norm_inputs: dict[str, torch.Tensor] = {}
             pv = video_inputs.get("pixel_values_videos")
             if pv is None:
@@ -1074,49 +1076,33 @@ class TextAndVideoFrontAndTwoLayers(nn.Module):
                 print(f"[rank{rid}] TextAndVideoFront.forward: grid_thw shape={tuple(grid.shape)}")
 
             if norm_inputs:
+                pixel_values_tensor = norm_inputs["pixel_values"]
+                grid_tensor = norm_inputs.get("grid_thw")
+
                 if any(t.numel() == 0 for t in norm_inputs.values() if isinstance(t, torch.Tensor)):
                     print(f"[rank{rid}] TextAndVideoFront.forward: norm_inputs contain empty tensors; skip vision front")
-                else:
+                elif pixel_values_tensor.dim() >= 4:
                     print(f"[rank{rid}] TextAndVideoFront.forward: invoking vision_front with keys {list(norm_inputs.keys())}")
-                    vh, vc, vg = self.vision_front(norm_inputs)
-            try:
-                rid = dist.get_rank() if dist.is_initialized() else -1
-                print(f"[rank{rid}] TextAndVideoFront.forward: vision_front -> hidden={tuple(vh.shape) if isinstance(vh, torch.Tensor) else None} "
-                      f"cu={tuple(vc.shape) if isinstance(vc, torch.Tensor) else None} grid={tuple(vg.shape) if isinstance(vg, torch.Tensor) else None}")
-            except Exception:
-                pass
-            if isinstance(vh, torch.Tensor) and vh.numel() > 0:
-                vid_hidden_front = vh.contiguous()
-            else:
-                vid_hidden_front = hidden.new_empty(0, hidden.size(-1))
-            if isinstance(vc, torch.Tensor) and vc.numel() > 0:
-                vid_cu_window_seqlens = vc.contiguous()
-            else:
-                vid_cu_window_seqlens = torch.zeros(
-                    1,
-                    dtype=torch.int32,
-                    device=hidden.device,
-                )
-            if isinstance(vg, torch.Tensor) and vg.numel() > 0:
-                video_grid_thw = vg.to(dtype=torch.long, device=hidden.device).contiguous()
-            else:
-                video_grid_thw = torch.zeros(
-                    (0, 3),
-                    dtype=torch.long,
-                    device=hidden.device,
-                )
-        else:
-            vid_hidden_front = hidden.new_empty(0, hidden.size(-1))
-            vid_cu_window_seqlens = torch.zeros(
-                1,
-                dtype=torch.int32,
-                device=hidden.device,
-            )
-            video_grid_thw = torch.zeros(
-                (0, 3),
-                dtype=torch.long,
-                device=hidden.device,
-            )
+                    vh, vc, vg = self.vision_front({"pixel_values": pixel_values_tensor, "grid_thw": grid_tensor})
+                    if isinstance(vh, torch.Tensor) and vh.numel() > 0:
+                        vid_hidden_front = vh.contiguous()
+                    if isinstance(vc, torch.Tensor) and vc.numel() > 0:
+                        vid_cu_window_seqlens = vc.contiguous()
+                    if isinstance(vg, torch.Tensor) and vg.numel() > 0:
+                        video_grid_thw = vg.to(dtype=torch.long, device=hidden.device).contiguous()
+                else:
+                    print(f"[rank{rid}] TextAndVideoFront.forward: pixel_values dim {pixel_values_tensor.dim()} not supported by vision_front; using fallback embeddings")
+                    fallback_embeds = pixel_values_tensor.reshape(-1, pixel_values_tensor.size(-1)).contiguous()
+                    vid_hidden_front = fallback_embeds.to(hidden.device)
+                    vid_cu_window_seqlens = torch.tensor(
+                        [0, vid_hidden_front.size(0)], dtype=torch.int32, device=hidden.device
+                    )
+                    if isinstance(grid_tensor, torch.Tensor):
+                        video_grid_thw = grid_tensor.reshape(-1, grid_tensor.size(-1)).to(dtype=torch.long, device=hidden.device).contiguous()
+                    else:
+                        video_grid_thw = torch.zeros(
+                            (vid_hidden_front.size(0), 3), dtype=torch.long, device=hidden.device
+                        )
         try:
             rid = dist.get_rank() if dist.is_initialized() else -1
             print(f"[rank{rid}] TextAndVideoFront.forward: return video_front shapes hidden={tuple(vid_hidden_front.shape)} cu={tuple(vid_cu_window_seqlens.shape)} grid={tuple(video_grid_thw.shape)}")
