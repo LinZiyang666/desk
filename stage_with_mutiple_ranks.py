@@ -2222,23 +2222,33 @@ class PipelineStage_Multimodality(PipelineStage_with_mutiple_ranks):
 
         # grads_input 的顺序与 input_values（即 forward 里 flatten_input_tensors）一致
         valid_grad_count = 0
+        grad_debug: list[dict[str, Any]] = []
 
         for grad_idx, (gi, tag) in enumerate(zip(grads_input, order)):
+            row: dict[str, Any] = {"idx": grad_idx, "tag": tag}
             if tag is None:
+                row["reason"] = "tag_none"
+                grad_debug.append(row)
                 continue  # 非 head 来的张量（如 position_ids 占位）或非 tensor
+
             mod, local_idx = tag
+            row.update({"mod": mod, "slot": local_idx})
 
             if gi is None:
-                pass  # Skip None gradients
+                row["reason"] = "grad_none"
             elif not isinstance(gi, torch.Tensor):
-                pass  # Skip non-tensor gradients
+                row["reason"] = f"type_{type(gi).__name__}"
             elif not (gi.is_floating_point() or torch.is_complex(gi)):
-                pass  # Skip non-float/complex gradients
+                row["reason"] = f"dtype_{getattr(gi, 'dtype', 'unknown')}"
             else:
+                row["reason"] = "used"
+                row["shape"] = tuple(gi.shape)
+                row["dtype"] = str(gi.dtype)
                 # 只回传浮点/复数梯度，保持发送端过滤一致性
                 if 0 <= local_idx < len(per_mod_lists[mod]):
                     per_mod_lists[mod][local_idx] = gi
                     valid_grad_count += 1
+            grad_debug.append(row)
 
 
         # 写入 mm_bwd_cache（tuple 形式，供 get_bwd_send_ops_mm 使用）
@@ -2251,6 +2261,8 @@ class PipelineStage_Multimodality(PipelineStage_with_mutiple_ranks):
             sizes_dbg = {m: len(per_mod_lists[m]) for m in ("text","audio","vision")}
             present = list(self.mm_bwd_cache.get(bwd_chunk_id, {}).keys())
             print(f"[rank{dist.get_rank()}] packing.backward_one_chunk: mb={bwd_chunk_id} per_mod sizes={sizes_dbg} filled={filled_counts} mm_bwd_cache keys={present}")
+            if grad_debug:
+                print(f"[rank{dist.get_rank()}] packing.backward_one_chunk: mb={bwd_chunk_id} grad_split_debug={grad_debug}")
         except Exception:
             pass
 
