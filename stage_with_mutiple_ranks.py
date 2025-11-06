@@ -409,6 +409,19 @@ class PipelineStage_with_mutiple_ranks(PipelineStage):
                 slices = self._compute_1d_slices(buf_flat.numel(), num_splits)
                 plans.append((slot_ctr, buf_flat, slices))  # ===== TAG-ADD =====
                 slot_ctr += 1                               # ===== TAG-ADD =====
+        try:
+            if slot_ctr and bwd_chunk_id < 4:
+                stage_type = getattr(self, "modal_type", getattr(self, "model_type", ""))
+                recv_shapes = [
+                    tuple(info.buffer.shape) if isinstance(info, _RecvInfo) and isinstance(info.buffer, torch.Tensor) else None
+                    for info in recv_infos
+                ]
+                print(
+                    f"[rank{dist.get_rank()}] get_bwd_recv_ops: stage={self.stage_index} type={stage_type} "
+                    f"modality={modality} mb={bwd_chunk_id} expected_recv_slots={slot_ctr} recv_shapes={recv_shapes}"
+                )
+        except Exception:
+            pass
 
         ops: list[dist.P2POp] = []
         ops_per_chunk: list[int] = [0 for _ in range(max(1, num_splits))]
@@ -1539,6 +1552,13 @@ class PipelineStage_Multimodality(PipelineStage_with_mutiple_ranks):
                 else:
                     details.append((i, None, None, False))
             print(f"[rank{dist.get_rank()}] get_bwd_send_ops_mm: mb={bwd_chunk_id} mod={modality} grads_tuple_details={details}")
+            expected_slots = len(self.mm_fwd_cache.get(bwd_chunk_id, {}).get(modality, ()))
+            tensor_slots = [i for i, g in enumerate(grads_tuple) if isinstance(g, torch.Tensor)]
+            none_slots = [i for i, g in enumerate(grads_tuple) if not isinstance(g, torch.Tensor)]
+            print(
+                f"[rank{dist.get_rank()}] get_bwd_send_ops_mm: mb={bwd_chunk_id} mod={modality} "
+                f"expected_slots={expected_slots} tensor_slots={tensor_slots} none_slots={none_slots}"
+            )
         except Exception:
             pass
 
